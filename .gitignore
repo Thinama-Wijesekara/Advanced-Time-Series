@@ -218,3 +218,26 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Environments can be nested under notebooks or project folders.
+**/.venv/
+**/venv/
+
+# Local credentials and editor state.
+.env.*
+!.env.example
+.vscode/
+
+# Generated pipeline data and model versions.
+data/backups/
+data/forecasts/
+data/raw/daily_total_sales.csv
+data/raw/upload_*.csv
+data/clean/*.csv
+models/selected_models/*/versions/
+models/selected_models/*/.tmp_*/
+
+# Notebook and model inference caches.
+**/.ipynb_checkpoints/
+Chronos/cache_*.npy
+Chronos/chronos_large_predictions.npz

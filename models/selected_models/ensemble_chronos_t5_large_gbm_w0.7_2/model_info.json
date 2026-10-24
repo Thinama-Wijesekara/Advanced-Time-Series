@@ -1,0 +1,33 @@
+{
+  "name": "Ensemble: zero-shot adj + GBM (w=0.7)",
+  "original_source_path": "Chronos/chronos_large_pipeline.ipynb; GBM/calendar files copied from models/gbm_calendar_ensemble",
+  "base_model": "amazon/chronos-t5-large + HistGradientBoostingRegressor",
+  "huggingface_name": "amazon/chronos-t5-large",
+  "method": "ensemble",
+  "ensemble_weights": {
+    "chronos": 0.7,
+    "gbm": 0.3
+  },
+  "context": 512,
+  "horizon": 16,
+  "num_samples": 20,
+  "seed": 42,
+  "data": "calendar-adjusted series",
+  "metrics": {
+    "test_MAE": 46120.506,
+    "test_RMSE": 68816.232,
+    "test_MAPE": 5.050,
+    "valid_MAPE": 7.607
+  },
+  "metric_sources_checked": [
+    "Chronos/chronos_large_results.csv",
+    "Chronos/models/gbm_calendar_ensemble/model_info.json"
+  ],
+  "files": [
+    "gbm.joblib",
+    "calendar_ridge_train.joblib",
+    "calendar_ridge_train_valid.joblib",
+    "model_info.json"
+  ],
+  "notes": "The pretrained Chronos weights are not copied; load amazon/chronos-t5-large from Hugging Face."
+}

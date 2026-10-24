@@ -1,0 +1,18 @@
+{
+  "context": 512,
+  "horizon": 16,
+  "train_frac": 0.8,
+  "valid_frac": 0.1,
+  "ridge_alpha": 3.0,
+  "calendar_rolling_window": 28,
+  "calendar_min_periods": 14,
+  "level_lookback": 28,
+  "num_samples": 20,
+  "seed": 42,
+  "prediction_batch_size": 2,
+  "gbm_max_iter": 300,
+  "gbm_learning_rate": 0.05,
+  "gbm_max_depth": 4,
+  "gbm_l2_regularization": 1.0,
+  "gbm_random_state": 0
+}

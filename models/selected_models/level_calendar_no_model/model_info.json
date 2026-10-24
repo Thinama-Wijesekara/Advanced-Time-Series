@@ -1,0 +1,24 @@
+{
+  "name": "Level + calendar (no model)",
+  "original_source_path": "Chronos/chronos_large_pipeline.ipynb, saved assets from models/gbm_calendar_ensemble",
+  "base_model": "Ridge calendar-effect model",
+  "method": "calendar baseline",
+  "context": 28,
+  "horizon": 16,
+  "data": "calendar-adjusted sales",
+  "metrics": {
+    "test_MAE": 45947.541,
+    "test_RMSE": 68441.264,
+    "test_MAPE": 5.019,
+    "valid_MAPE": 10.077
+  },
+  "metric_sources_checked": [
+    "Chronos/chronos_large_results.csv",
+    "Chronos/chronos_large_pipeline.ipynb"
+  ],
+  "files": [
+    "calendar_ridge_train.joblib",
+    "calendar_ridge_train_valid.joblib"
+  ],
+  "notes": "Uses the 28-day trailing level with the saved Ridge calendar effects; training rows are used for validation and train+validation rows for test."
+}

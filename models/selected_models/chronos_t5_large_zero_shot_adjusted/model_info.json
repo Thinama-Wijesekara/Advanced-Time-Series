@@ -1,0 +1,26 @@
+{
+  "name": "Chronos-large zero-shot (adjusted)",
+  "original_source_path": "Hugging Face: amazon/chronos-t5-large; evaluation in Chronos/chronos_large_pipeline.ipynb",
+  "base_model": "amazon/chronos-t5-large",
+  "huggingface_name": "amazon/chronos-t5-large",
+  "method": "zero-shot",
+  "context": 512,
+  "horizon": 16,
+  "num_samples": 20,
+  "seed": 42,
+  "data": "calendar-adjusted series",
+  "metrics": {
+    "test_MAE": 49127.258,
+    "test_RMSE": 73190.740,
+    "test_MAPE": 5.348,
+    "valid_MAPE": 7.910
+  },
+  "metric_sources_checked": [
+    "Chronos/chronos_large_results.csv",
+    "Chronos/chronos_large_pipeline.ipynb"
+  ],
+  "files": [
+    "model_info.json"
+  ],
+  "notes": "No model weights are copied because this is the pretrained Hugging Face model."
+}
