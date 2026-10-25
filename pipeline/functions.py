@@ -162,6 +162,9 @@ def _validate_upload_dates(dates: pd.Series, history_end: pd.Timestamp) -> None:
         )
     expected_dates = pd.date_range(unique_dates[0], unique_dates[-1], freq="D")
     missing_dates = expected_dates.difference(unique_dates)
+    missing_dates = missing_dates[
+        ~((missing_dates.month == 12) & (missing_dates.day == 25))
+    ]
     if not missing_dates.empty:
         missing_text = ", ".join(date.strftime("%Y-%m-%d") for date in missing_dates[:10])
         raise ValueError(f"Upload has missing calendar dates: {missing_text}.")
@@ -267,13 +270,49 @@ def ingest_upload(path: str | Path) -> pd.DataFrame:
 
 
 def aggregate_upload(upload_df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate store-level records by date; pass daily totals through unchanged."""
+    """Aggregate store records and fill absent Christmas dates in either format."""
     if "store_nbr" not in upload_df.columns:
-        return _normalize_daily_dataframe(upload_df)
-    return (
+        daily = _normalize_daily_dataframe(upload_df)
+        dates = pd.DatetimeIndex(daily["timestamp_utc"])
+        calendar = pd.date_range(dates.min(), dates.max(), freq="D")
+        missing_dates = calendar.difference(dates)
+        christmas_dates = missing_dates[
+            (missing_dates.month == 12) & (missing_dates.day == 25)
+        ]
+        if len(christmas_dates):
+            print(
+                "Filled absent upload date(s) with 0.0 sales: "
+                + ", ".join(date.strftime("%Y-%m-%d") for date in christmas_dates)
+            )
+            daily = pd.concat(
+                [
+                    daily,
+                    pd.DataFrame(
+                        {"timestamp_utc": christmas_dates, "sales": 0.0}
+                    ),
+                ],
+                ignore_index=True,
+            )
+        return daily.sort_values("timestamp_utc").reset_index(drop=True)
+
+    daily = (
         upload_df.groupby("date", as_index=False, sort=True)["sales"]
         .sum()
         .rename(columns={"date": "timestamp_utc"})
+    )
+    dates = pd.DatetimeIndex(daily["timestamp_utc"])
+    calendar = pd.date_range(dates.min(), dates.max(), freq="D")
+    missing_dates = calendar.difference(dates)
+    if len(missing_dates):
+        print(
+            "Filled absent upload date(s) with 0.0 sales: "
+            + ", ".join(date.strftime("%Y-%m-%d") for date in missing_dates)
+        )
+    return (
+        daily.set_index("timestamp_utc")
+        .reindex(calendar, fill_value=0.0)
+        .rename_axis("timestamp_utc")
+        .reset_index()
     )
 
 
