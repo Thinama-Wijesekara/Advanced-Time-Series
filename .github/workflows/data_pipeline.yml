@@ -61,6 +61,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No tracked data changes to commit."
           else
-            git commit -m "Update store sales forecasts"
+            git commit -m "Update store sales forecasts" -m "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
             git push origin HEAD:main
           fi
