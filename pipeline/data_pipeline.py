@@ -17,7 +17,10 @@ def _run_step(number: int, name: str, action: Callable[[], Any]) -> Any:
         result = action()
     except Exception as exc:
         elapsed = time.perf_counter() - started
-        print(f"Step {number}: Failed ({name}) after {elapsed:.2f}s: {exc}", file=sys.stderr)
+        print(
+            f"Step {number}: Failed ({name}, {elapsed:.2f}s): {exc}",
+            file=sys.stderr,
+        )
         raise
     elapsed = time.perf_counter() - started
     print(f"Step {number}: Done ({name}, {elapsed:.2f}s)")
@@ -29,14 +32,27 @@ def run_pipeline(upload_path: str | Path | None = None) -> Path:
     if upload_path is None:
         print("Step 1: Skipped (no upload provided)")
         print("Step 2: Skipped (no upload provided)")
-        _run_step(3, "preprocess master raw data", functions.preprocess)
+        print("Step 3: Skipped (no upload provided)")
     else:
-        uploaded = _run_step(1, "ingest upload", lambda: functions.ingest_upload(upload_path))
-        _run_step(2, "update master raw data", lambda: functions.update_master_raw(uploaded))
-        _run_step(3, "preprocess master raw data", functions.preprocess)
+        uploaded = _run_step(
+            1,
+            "validate and archive upload",
+            lambda: functions.ingest_upload(upload_path),
+        )
+        daily_totals = _run_step(
+            2,
+            "aggregate upload by date",
+            lambda: functions.aggregate_upload(uploaded),
+        )
+        _run_step(
+            3,
+            "merge upload into master history",
+            lambda: functions.update_master_raw(daily_totals),
+        )
 
-    _run_step(4, "refit and version models", functions.refit)
-    return _run_step(5, "forecast", functions.forecast)
+    _run_step(4, "clean full daily series", functions.preprocess)
+    _run_step(5, "refit and version models", functions.refit)
+    return _run_step(6, "forecast", functions.forecast)
 
 
 def main(argv: list[str] | None = None) -> int:

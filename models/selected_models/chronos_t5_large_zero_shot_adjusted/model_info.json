@@ -8,6 +8,7 @@
   "horizon": 16,
   "num_samples": 20,
   "seed": 42,
+  "sample_aggregation": "median",
   "data": "calendar-adjusted series",
   "metrics": {
     "test_MAE": 49127.258,

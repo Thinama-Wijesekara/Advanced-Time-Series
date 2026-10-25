@@ -1,8 +1,8 @@
-pandas
-numpy
-scikit-learn
-joblib
-torch
-chronos-forecasting
-transformers
-tqdm
+pandas==3.0.6
+numpy==2.5.3
+scikit-learn==1.7.2
+joblib==1.6.0
+torch==2.11.0
+chronos-forecasting==2.3.2
+transformers==5.18.0
+tqdm==4.70.1

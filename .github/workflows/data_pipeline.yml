@@ -1,0 +1,66 @@
+name: Store sales data pipeline
+
+on:
+  schedule:
+    - cron: "0 2 * * 1"
+  workflow_dispatch:
+    inputs:
+      upload_path:
+        description: Optional path to a CSV available in the runner workspace
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: store-sales-data-pipeline
+  cancel-in-progress: false
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pipeline/requirements.txt
+      - name: Install CPU-only PyTorch
+        run: python -m pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu
+      - name: Install pipeline dependencies
+        run: python -m pip install -r pipeline/requirements.txt
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: ${{ runner.os }}-huggingface-amazon-chronos-t5-large
+      - name: Run forecasting pipeline
+        env:
+          UPLOAD_PATH: ${{ inputs.upload_path }}
+        run: |
+          if [ -n "$UPLOAD_PATH" ]; then
+            python pipeline/data_pipeline.py "$UPLOAD_PATH"
+          else
+            python pipeline/data_pipeline.py
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: store-sales-pipeline-output
+          path: |
+            data/forecasts/
+            data/clean/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Commit updated data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f data/clean/train_cleaned_data data/forecasts/latest_forecast.csv
+          if git diff --cached --quiet; then
+            echo "No tracked data changes to commit."
+          else
+            git commit -m "Update store sales forecasts"
+            git push origin HEAD:main
+          fi

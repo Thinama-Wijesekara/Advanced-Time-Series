@@ -5,6 +5,9 @@
   "method": "calendar baseline",
   "context": 28,
   "horizon": 16,
+  "num_samples": 20,
+  "seed": 42,
+  "sample_aggregation": "median",
   "data": "calendar-adjusted sales",
   "metrics": {
     "test_MAE": 45947.541,

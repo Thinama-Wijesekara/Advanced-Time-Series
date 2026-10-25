@@ -7,7 +7,8 @@ models:
 2. Chronos-T5-large + gradient-boosting ensemble (Chronos weight 0.7)
 3. Level + calendar baseline
 
-The complete daily-total training series and holiday reference are in `data/`.
+The complete master and cleaned daily-total series and the holiday/store
+references are in `data/`.
 The zero-shot Chronos model weights are downloaded from Hugging Face on first
 run; the selected local model metadata and ensemble/calendar artifacts are in
 `models/selected_models/`.
@@ -33,25 +34,28 @@ training data:
 python pipeline/data_pipeline.py
 ```
 
-To append newly observed daily totals before preprocessing, refitting the
-calendar/GBM artifacts, and forecasting, provide a CSV with `timestamp_utc` and
-`sales` columns:
+To append new store-level data before preprocessing, refitting the calendar/GBM
+artifacts, and forecasting, provide a CSV with `date`, `store_nbr`, `family`,
+and `sales` columns. Extra columns are preserved in the archived original:
 
 ```powershell
-python pipeline/data_pipeline.py path/to/daily_sales_upload.csv
+python pipeline/data_pipeline.py path/to/store_sales_upload.csv
 ```
 
-For overlapping dates, uploaded values replace existing rows. The pipeline
-backs up the current raw and cleaned data before updating them. It writes
-timestamped model versions under `models/selected_models/` and forecast CSVs
-under `data/forecasts/`; generated versions and outputs are intentionally
-excluded from Git.
+Legacy daily-total CSVs with `timestamp_utc` and `sales` columns are also
+accepted. The pipeline checks dates and store coverage against
+`data/reference/stores.csv`, archives each valid upload untouched under
+`data/raw/uploads/`, aggregates store-level sales by date, and lets uploaded
+values replace existing dates. The master and cleaned series are backed up
+before each overwrite.
 
-The committed seed series is pre-aggregated by date. New uploaded observations
-must also be daily totals. The forecast file is in long format with `date`,
-`model`, and `forecast` columns. See `pipeline/` for ingestion, preprocessing,
-refitting, and inference implementation. Model parameters are stored in
-`pipeline/config.json`, separate from exploratory notebooks.
+Refitted model artifacts are versioned under `models/selected_models/*/versions/`;
+original model files are never overwritten. Timestamped and latest forecast
+files are written under `data/forecasts/` in long format with `date`, `model`,
+and `forecast` columns. The generated outputs, upload archives, backups, and
+model versions are excluded from Git; the master and cleaned histories remain
+tracked. The weekly GitHub Actions workflow can also be started manually with
+an optional `upload_path`.
 
 ## Validation
 

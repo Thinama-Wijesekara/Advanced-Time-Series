@@ -9,6 +9,7 @@
   "level_lookback": 28,
   "num_samples": 20,
   "seed": 42,
+  "sample_aggregation": "median",
   "prediction_batch_size": 2,
   "gbm_max_iter": 300,
   "gbm_learning_rate": 0.05,

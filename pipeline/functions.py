@@ -22,13 +22,16 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = Path(os.environ.get("STORE_SALES_DATA_DIR", PROJECT_ROOT / "data"))
 RAW_DIR = DATA_DIR / "raw"
 CLEAN_DIR = DATA_DIR / "clean"
+MASTER_DIR = CLEAN_DIR / "train_cleaned_data"
 REFERENCE_DIR = DATA_DIR / "reference"
 BACKUPS_DIR = DATA_DIR / "backups"
 FORECASTS_DIR = DATA_DIR / "forecasts"
-MASTER_RAW_PATH = RAW_DIR / "daily_total_sales.csv"
+UPLOADS_DIR = RAW_DIR / "uploads"
+MASTER_RAW_PATH = MASTER_DIR / "daily_total_sales.csv"
 SEED_RAW_PATH = RAW_DIR / "daily_total_sales_initial.csv"
-CLEAN_PATH = CLEAN_DIR / "daily_total_sales_clean.csv"
+CLEAN_PATH = MASTER_DIR / "daily_total_sales_clean.csv"
 HOLIDAYS_PATH = REFERENCE_DIR / "holidays_events.csv"
+STORES_PATH = REFERENCE_DIR / "stores.csv"
 CONFIG_PATH = PROJECT_ROOT / "pipeline" / "config.json"
 MODEL_ROOT = Path(
     os.environ.get(
@@ -40,6 +43,7 @@ MODEL_ROOT = Path(
 LARGE_ZERO_SHOT = "chronos_t5_large_zero_shot_adjusted"
 LARGE_ENSEMBLE = "ensemble_chronos_t5_large_gbm_w0.7_2"
 LEVEL_CALENDAR = "level_calendar_no_model"
+CHRONOS_MODEL_ID = "amazon/chronos-t5-large"
 REFIT_MODEL_NAMES = (LARGE_ENSEMBLE, LEVEL_CALENDAR)
 
 
@@ -48,7 +52,14 @@ def _timestamp() -> str:
 
 
 def _ensure_data_directories() -> None:
-    for directory in (RAW_DIR, CLEAN_DIR, REFERENCE_DIR, BACKUPS_DIR, FORECASTS_DIR):
+    for directory in (
+        RAW_DIR,
+        UPLOADS_DIR,
+        MASTER_DIR,
+        REFERENCE_DIR,
+        BACKUPS_DIR,
+        FORECASTS_DIR,
+    ):
         directory.mkdir(parents=True, exist_ok=True)
     if not MASTER_RAW_PATH.exists():
         if not SEED_RAW_PATH.is_file():
@@ -60,42 +71,175 @@ def _ensure_data_directories() -> None:
         raise FileNotFoundError(f"Holiday reference file not found: {HOLIDAYS_PATH}.")
 
 
-def _normalize_upload_dataframe(upload_df: pd.DataFrame) -> pd.DataFrame:
-    required_columns = {"timestamp_utc", "sales"}
-    missing = required_columns.difference(upload_df.columns)
+def _parse_dates(values: pd.Series, column_name: str) -> pd.Series:
+    dates = pd.to_datetime(
+        values.astype("string"),
+        format="mixed",
+        errors="coerce",
+        utc=True,
+    )
+    if dates.isna().any():
+        bad_rows = (np.flatnonzero(dates.isna().to_numpy()) + 2).tolist()
+        raise ValueError(
+            f"Upload has unparseable {column_name} values on CSV row(s): {bad_rows}."
+        )
+    return dates.dt.tz_convert(None).dt.normalize()
+
+
+def _normalize_sales(upload_df: pd.DataFrame) -> pd.Series:
+    sales = pd.to_numeric(upload_df["sales"], errors="coerce")
+    invalid_sales = sales.isna() | ~np.isfinite(sales.to_numpy(dtype="float64"))
+    if invalid_sales.any():
+        bad_rows = (np.flatnonzero(invalid_sales.to_numpy()) + 2).tolist()
+        raise ValueError(
+            f"Upload has non-numeric or missing sales values on CSV row(s): {bad_rows}."
+        )
+    if (sales < 0).any():
+        bad_rows = (np.flatnonzero((sales < 0).to_numpy()) + 2).tolist()
+        raise ValueError(f"Upload has negative sales values on CSV row(s): {bad_rows}.")
+    return sales.astype("float64")
+
+
+def _normalize_daily_dataframe(upload_df: pd.DataFrame) -> pd.DataFrame:
+    date_column = "timestamp_utc" if "timestamp_utc" in upload_df.columns else "date"
+    missing = {date_column, "sales"}.difference(upload_df.columns)
     if missing:
         raise ValueError(
-            "Upload must contain columns 'timestamp_utc' and 'sales'; "
+            "Daily-total upload must contain columns 'timestamp_utc' (or 'date') "
+            "and 'sales'; "
             f"missing: {', '.join(sorted(missing))}."
         )
     if upload_df.empty:
         raise ValueError("Upload contains no data rows.")
 
-    dates = pd.to_datetime(upload_df["timestamp_utc"], errors="coerce")
-    if dates.isna().any():
-        bad_rows = (np.flatnonzero(dates.isna().to_numpy()) + 2).tolist()
-        raise ValueError(f"Upload has unparseable timestamp_utc values on CSV row(s): {bad_rows}.")
+    normalized = pd.DataFrame(
+        {
+            "timestamp_utc": _parse_dates(upload_df[date_column], date_column),
+            "sales": _normalize_sales(upload_df),
+        }
+    )
+    if normalized["timestamp_utc"].duplicated().any():
+        duplicates = (
+            normalized.loc[
+                normalized["timestamp_utc"].duplicated(keep=False), "timestamp_utc"
+            ]
+            .dt.strftime("%Y-%m-%d")
+            .drop_duplicates()
+            .tolist()
+        )
+        raise ValueError(
+            f"Daily-total upload has duplicate dates: {', '.join(duplicates[:10])}."
+        )
+    return normalized
 
-    sales = pd.to_numeric(upload_df["sales"], errors="coerce")
-    invalid_sales = sales.isna() | ~np.isfinite(sales.to_numpy(dtype="float64"))
-    if invalid_sales.any():
-        bad_rows = (np.flatnonzero(invalid_sales.to_numpy()) + 2).tolist()
-        raise ValueError(f"Upload has non-numeric or missing sales values on CSV row(s): {bad_rows}.")
-    if (sales < 0).any():
-        bad_rows = (np.flatnonzero((sales < 0).to_numpy()) + 2).tolist()
-        raise ValueError(f"Upload has negative sales values on CSV row(s): {bad_rows}.")
+
+def _expected_store_count() -> int:
+    if not STORES_PATH.is_file():
+        raise FileNotFoundError(f"Store reference file not found: {STORES_PATH}.")
+    stores = pd.read_csv(STORES_PATH)
+    if "store_nbr" not in stores.columns or stores.empty:
+        raise ValueError(
+            f"Store reference file must contain store_nbr values: {STORES_PATH}."
+        )
+    count = int(stores["store_nbr"].nunique(dropna=True))
+    if count != len(stores) or count == 0:
+        raise ValueError(
+            f"Store reference has missing or duplicate store_nbr values: {STORES_PATH}."
+        )
+    return count
+
+
+def _validate_upload_dates(dates: pd.Series, history_end: pd.Timestamp) -> None:
+    unique_dates = pd.DatetimeIndex(dates.drop_duplicates().sort_values())
+    if unique_dates.empty:
+        raise ValueError("Upload has no complete dates to process.")
+    latest_start = history_end + pd.Timedelta(days=1)
+    if unique_dates[0] > latest_start:
+        raise ValueError(
+            f"Upload starts on {unique_dates[0]:%Y-%m-%d}, leaving a gap after "
+            f"the history ending {history_end:%Y-%m-%d}; it must start no later "
+            f"than {latest_start:%Y-%m-%d}."
+        )
+    expected_dates = pd.date_range(unique_dates[0], unique_dates[-1], freq="D")
+    missing_dates = expected_dates.difference(unique_dates)
+    if not missing_dates.empty:
+        missing_text = ", ".join(date.strftime("%Y-%m-%d") for date in missing_dates[:10])
+        raise ValueError(f"Upload has missing calendar dates: {missing_text}.")
+
+
+def _load_master_for_upload() -> tuple[pd.DataFrame, pd.Timestamp]:
+    if not MASTER_RAW_PATH.is_file():
+        raise FileNotFoundError(
+            f"Daily-total master file not found: {MASTER_RAW_PATH}."
+        )
+    try:
+        master = pd.read_csv(MASTER_RAW_PATH)
+    except (OSError, pd.errors.ParserError, UnicodeDecodeError) as exc:
+        raise ValueError(
+            f"Could not read master data '{MASTER_RAW_PATH}': {exc}"
+        ) from exc
+    normalized = _normalize_daily_dataframe(master)
+    if normalized.empty:
+        raise ValueError(f"Daily-total master is empty: {MASTER_RAW_PATH}.")
+    normalized = normalized.sort_values("timestamp_utc").reset_index(drop=True)
+    return normalized, pd.Timestamp(normalized["timestamp_utc"].max())
+
+
+def _normalize_store_upload(upload_df: pd.DataFrame) -> pd.DataFrame:
+    required_columns = {"date", "store_nbr", "family", "sales"}
+    missing = required_columns.difference(upload_df.columns)
+    if missing:
+        raise ValueError(
+            "Store-level upload must contain columns 'date', 'store_nbr', "
+            "'family', and 'sales'; "
+            f"missing: {', '.join(sorted(missing))}."
+        )
+    if upload_df.empty:
+        raise ValueError("Upload contains no data rows.")
 
     normalized = pd.DataFrame(
         {
-            "timestamp_utc": dates.dt.normalize(),
-            "sales": sales.astype("float64"),
+            "date": _parse_dates(upload_df["date"], "date"),
+            "store_nbr": upload_df["store_nbr"],
+            "family": upload_df["family"],
+            "sales": _normalize_sales(upload_df),
         }
     )
+    if normalized["store_nbr"].isna().any():
+        raise ValueError("Store-level upload has missing store_nbr values.")
+    if normalized["family"].isna().any():
+        raise ValueError("Store-level upload has missing family values.")
+
+    _, history_end = _load_master_for_upload()
+    expected_count = _expected_store_count()
+    store_counts = normalized.groupby("date")["store_nbr"].nunique()
+    last_date = pd.Timestamp(store_counts.index.max())
+
+    if int(store_counts.loc[last_date]) < expected_count:
+        print(
+            f"WARNING: Dropping incomplete final upload date {last_date:%Y-%m-%d}: "
+            f"{int(store_counts.loc[last_date])} stores found; expected {expected_count}."
+        )
+        normalized = normalized[normalized["date"] != last_date].copy()
+        store_counts = store_counts.drop(last_date)
+
+    invalid_counts = store_counts[store_counts != expected_count]
+    if not invalid_counts.empty:
+        details = ", ".join(
+            f"{date:%Y-%m-%d}: {count} stores"
+            for date, count in invalid_counts.head(10).items()
+        )
+        raise ValueError(
+            f"Upload dates must each contain {expected_count} unique stores. "
+            f"Invalid date(s): {details}."
+        )
+
+    _validate_upload_dates(normalized["date"], history_end)
     return normalized
 
 
 def ingest_upload(path: str | Path) -> pd.DataFrame:
-    """Validate an uploaded CSV, then save an untouched, timestamped copy."""
+    """Validate and archive an untouched store-level or daily-total CSV."""
     upload_path = Path(path)
     if not upload_path.is_file():
         raise FileNotFoundError(f"Upload file not found: {upload_path}")
@@ -104,26 +248,42 @@ def ingest_upload(path: str | Path) -> pd.DataFrame:
     except (OSError, pd.errors.ParserError, UnicodeDecodeError) as exc:
         raise ValueError(f"Could not read upload CSV '{upload_path}': {exc}") from exc
 
-    upload_df = _normalize_upload_dataframe(source_df)
+    if {"date", "store_nbr", "family", "sales"}.issubset(source_df.columns):
+        upload_df = _normalize_store_upload(source_df)
+    elif {"timestamp_utc", "sales"}.issubset(source_df.columns):
+        upload_df = _normalize_daily_dataframe(source_df)
+        _, history_end = _load_master_for_upload()
+        _validate_upload_dates(upload_df["timestamp_utc"], history_end)
+    else:
+        raise ValueError(
+            "Upload must contain either date, store_nbr, family, sales or "
+            "timestamp_utc, sales columns."
+        )
 
-    _ensure_data_directories()
-    archive_path = RAW_DIR / f"upload_{_timestamp()}_{upload_path.name}"
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    archive_path = UPLOADS_DIR / f"upload_{_timestamp()}_{upload_path.name}"
     shutil.copy2(upload_path, archive_path)
     return upload_df
 
 
+def aggregate_upload(upload_df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate store-level records by date; pass daily totals through unchanged."""
+    if "store_nbr" not in upload_df.columns:
+        return _normalize_daily_dataframe(upload_df)
+    return (
+        upload_df.groupby("date", as_index=False, sort=True)["sales"]
+        .sum()
+        .rename(columns={"date": "timestamp_utc"})
+    )
+
+
 def update_master_raw(upload_df: pd.DataFrame) -> pd.DataFrame:
-    """Back up and merge upload rows; the upload wins for dates present in both."""
-    normalized_upload = _normalize_upload_dataframe(upload_df)
+    """Back up and merge daily totals; uploaded values replace matching dates."""
+    normalized_upload = _normalize_daily_dataframe(upload_df)
     _ensure_data_directories()
+    normalized_master, _ = _load_master_for_upload()
 
-    try:
-        master_df = pd.read_csv(MASTER_RAW_PATH)
-    except (OSError, pd.errors.ParserError, UnicodeDecodeError) as exc:
-        raise ValueError(f"Could not read master raw CSV '{MASTER_RAW_PATH}': {exc}") from exc
-    normalized_master = _normalize_upload_dataframe(master_df)
-
-    backup_path = BACKUPS_DIR / f"daily_total_sales_raw_{_timestamp()}.csv"
+    backup_path = BACKUPS_DIR / f"daily_total_sales_master_{_timestamp()}.csv"
     shutil.copy2(MASTER_RAW_PATH, backup_path)
 
     merged = pd.concat([normalized_master, normalized_upload], ignore_index=True)
@@ -429,11 +589,15 @@ def _load_chronos_pipelines(
         if "huggingface_name" not in info:
             continue
         model_id = info["huggingface_name"]
+        if model_id != CHRONOS_MODEL_ID:
+            raise ValueError(
+                f"Only {CHRONOS_MODEL_ID} is allowed; found model ID {model_id!r}."
+            )
         if model_id not in pipelines:
             pipelines[model_id] = ChronosPipeline.from_pretrained(
                 model_id,
                 device_map=device,
-                torch_dtype=dtype,
+                dtype=dtype,
             )
     return pipelines, device, dtype
 
@@ -455,6 +619,42 @@ def forecast(pipelines: dict[str, Any] | None = None) -> Path:
         LARGE_ENSEMBLE: _read_model_info(LARGE_ENSEMBLE),
         LEVEL_CALENDAR: _read_model_info(LEVEL_CALENDAR),
     }
+    for model_name, info in model_infos.items():
+        expected_context = (
+            settings["context"]
+            if model_name in (LARGE_ZERO_SHOT, LARGE_ENSEMBLE)
+            else settings["level_lookback"]
+        )
+        if int(info["context"]) != expected_context:
+            raise ValueError(
+                f"{model_name}/model_info.json context must be {expected_context}."
+            )
+        if int(info["horizon"]) != int(settings["horizon"]):
+            raise ValueError(
+                f"{model_name}/model_info.json horizon must match pipeline/config.json."
+            )
+        if int(info.get("num_samples", -1)) != int(settings["num_samples"]):
+            raise ValueError(
+                f"{model_name}/model_info.json num_samples must match pipeline/config.json."
+            )
+        if int(info.get("seed", -1)) != int(settings["seed"]):
+            raise ValueError(
+                f"{model_name}/model_info.json seed must match pipeline/config.json."
+            )
+        if info.get("sample_aggregation") != settings["sample_aggregation"]:
+            raise ValueError(
+                f"{model_name}/model_info.json sample_aggregation must match "
+                "pipeline/config.json."
+            )
+        if model_name in (LARGE_ZERO_SHOT, LARGE_ENSEMBLE):
+            if info.get("huggingface_name") != CHRONOS_MODEL_ID:
+                raise ValueError(
+                    f"{model_name}/model_info.json must reference only {CHRONOS_MODEL_ID}."
+                )
+        elif "huggingface_name" in info:
+            raise ValueError(
+                f"{model_name}/model_info.json must not reference a Chronos model."
+            )
     if pipelines is None:
         pipelines, _, _ = _load_chronos_pipelines(model_infos)
 
@@ -497,7 +697,7 @@ def forecast(pipelines: dict[str, Any] | None = None) -> Path:
         pd.DataFrame(
             {
                 "date": future_dates,
-                "model": zero_info["name"],
+                "model": LARGE_ZERO_SHOT,
                 "forecast": large_adjusted.reshape(-1),
             }
         )
@@ -549,13 +749,12 @@ def forecast(pipelines: dict[str, Any] | None = None) -> Path:
         pd.DataFrame(
             {
                 "date": future_dates,
-                "model": info["name"],
+                "model": LARGE_ENSEMBLE,
                 "forecast": ensemble_forecast.reshape(-1),
             }
         )
     )
 
-    baseline_info = model_infos[LEVEL_CALENDAR]
     baseline_model_dir = _newest_model_dir(LEVEL_CALENDAR)
     baseline_ridge = joblib.load(baseline_model_dir / "calendar_ridge_train_valid.joblib")
     baseline_history_effect = baseline_ridge.predict(xcal_history)
@@ -567,13 +766,24 @@ def forecast(pipelines: dict[str, Any] | None = None) -> Path:
         pd.DataFrame(
             {
                 "date": future_dates,
-                "model": baseline_info["name"],
+                "model": LEVEL_CALENDAR,
                 "forecast": baseline_forecast,
             }
         )
     )
 
     forecast_df = pd.concat(output_frames, ignore_index=True)
+    expected_models = {LARGE_ZERO_SHOT, LARGE_ENSEMBLE, LEVEL_CALENDAR}
+    if set(forecast_df["model"]) != expected_models:
+        raise ValueError("Forecast output does not contain exactly the three selected models.")
+    model_counts = forecast_df.groupby("model").size()
+    if not model_counts.eq(int(settings["horizon"])).all():
+        raise ValueError(
+            f"Each selected model must produce {settings['horizon']} forecast rows."
+        )
+    if not np.isfinite(forecast_df["forecast"].to_numpy(dtype="float64")).all():
+        raise ValueError("Forecast output contains NaN or infinite values.")
+
     timestamp = _timestamp()
     forecast_path = FORECASTS_DIR / f"forecast_{timestamp}.csv"
     forecast_df.to_csv(forecast_path, index=False, date_format="%Y-%m-%d")
