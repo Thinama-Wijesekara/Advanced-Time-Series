@@ -63,3 +63,35 @@ an optional `upload_path`.
 python -m compileall -q pipeline
 python pipeline/validate_assets.py
 ```
+
+## Local web dashboard
+
+The local dashboard accepts store-level CSV and Excel (`.xlsx`) uploads and
+runs the same six pipeline steps for each valid file. It listens only on the
+loopback interface and does not send uploaded sales data to a hosted service.
+Chronos is not retrained; the calendar Ridge and GBM components are refit.
+
+Install the pinned Python 3.12 dependencies from the repository root:
+
+```powershell
+python -m pip install -r pipeline/requirements.txt
+```
+
+Start the local backend and open `http://127.0.0.1:8000/`:
+
+```powershell
+python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+```
+
+On first start, the app creates an ignored `runtime/` working copy of the
+tracked `data/` and `models/selected_models/` files. The store-level
+`data/raw/train.csv` is excluded and is never copied. The pipeline writes
+uploads, job state, refits, cleaned data, and forecasts only in this runtime
+copy, leaving tracked files untouched. The Chronos-large weights must already
+be cached or downloaded on the first forecast run.
+
+The page shows the current history and latest forecast before any upload.
+Accepted `.csv` and `.xlsx` files must contain `date`, `store_nbr`, `family`,
+and `sales` columns; each accepted upload runs validation, aggregation,
+history merge, cleaning, Ridge/GBM refit, and forecasting in sequence. The
+runtime keeps the latest forecast available if a later job fails.
