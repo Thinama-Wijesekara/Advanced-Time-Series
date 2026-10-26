@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#f5f7fb">
     <title>Store Sales Forecast | Advanced Time Series</title>
-    <link rel="stylesheet" href="/css/styles.css?v=2">
+    <link rel="stylesheet" href="/css/styles.css?v=3">
     <script src="/vendor/chart.4.6.1.umd.min.js" defer></script>
-    <script src="/js/app.js?v=2" defer></script>
+    <script src="/js/app.js?v=3" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -36,6 +36,7 @@
     </header>
 
     <main class="page-shell">
+      <div id="publish-notice" class="message-box publish-notice" role="status" hidden></div>
       <section class="page-intro">
         <div>
           <p class="eyebrow">FORECAST WORKSPACE</p>
@@ -73,6 +74,7 @@
           </div>
           <div id="upload-error" class="message-box error-box" role="alert" hidden></div>
           <div id="upload-success" class="message-box success-box" role="status" hidden></div>
+          <div id="upload-publish-status" class="message-box warning-box" role="status" hidden></div>
         </article>
 
         <article class="panel progress-panel">

@@ -18,6 +18,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from api import publishing
+
 
 LOGGER = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -218,6 +220,8 @@ class JobManager:
             "first_date_added",
             "last_date_added",
             "status",
+            "publish_status",
+            "publish_message",
             "error",
         )
         with self._lock:
@@ -269,6 +273,34 @@ class JobManager:
                 latest_path.read_bytes() if latest_path.is_file() else None
             )
             self._run_pipeline_steps(job_id, upload_path, functions)
+            settings = publishing.publish_settings(REPO_ROOT)
+            outcome = publishing.PublishOutcome("disabled")
+            if settings.error:
+                outcome = publishing.PublishOutcome("failed", settings.error)
+            elif settings.enabled:
+                with self._lock:
+                    job = self._find_job_locked(job_id)
+                    if job is not None:
+                        job["publish_status"] = "publishing"
+                        job["publish_message"] = (
+                            "Publishing derived data to the public GitHub repository "
+                            "and starting its pipeline."
+                        )
+                        self._persist_locked()
+                try:
+                    outcome = publishing.publish_runtime_outputs(
+                        REPO_ROOT, RUNTIME_DATA_DIR
+                    )
+                except Exception as exc:
+                    LOGGER.error(
+                        "Optional GitHub publishing failed (%s); local results remain available.",
+                        type(exc).__name__,
+                    )
+                    outcome = publishing.PublishOutcome(
+                        "failed",
+                        "GitHub publishing failed unexpectedly. Local results remain "
+                        "available; inspect the app configuration and retry.",
+                    )
             with self._lock:
                 job = self._find_job_locked(job_id)
                 if job is None:
@@ -276,6 +308,8 @@ class JobManager:
                 job["status"] = "done"
                 job["current_step"] = 6
                 job["current_step_name"] = STEP_NAMES[5]
+                job["publish_status"] = outcome.status
+                job["publish_message"] = outcome.message
                 job["finished_at"] = datetime.now().astimezone().isoformat(
                     timespec="seconds"
                 )
@@ -410,6 +444,9 @@ def initialize() -> None:
     ensure_runtime()
     pipeline_functions()
     job_manager.load()
+    settings = publishing.publish_settings(REPO_ROOT)
+    if settings.error:
+        LOGGER.warning("Optional publishing configuration: %s", settings.error)
 
 
 def validate_uploaded_file(path: Path, extension: str) -> tuple[pd.DataFrame, int]:
@@ -470,6 +507,8 @@ def build_job(
         "current_step": 0,
         "current_step_name": "Waiting to start",
         "error": None,
+        "publish_status": "not_started",
+        "publish_message": None,
         "forecast_created_at": None,
         "steps": [
             {

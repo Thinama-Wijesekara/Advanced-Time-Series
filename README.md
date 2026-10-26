@@ -95,3 +95,31 @@ Accepted `.csv` and `.xlsx` files must contain `date`, `store_nbr`, `family`,
 and `sales` columns; each accepted upload runs validation, aggregation,
 history merge, cleaning, Ridge/GBM refit, and forecasting in sequence. The
 runtime keeps the latest forecast available if a later job fails.
+
+### Optional GitHub publishing
+
+Publishing is **off by default**. Upload results stay in `runtime/` unless you
+explicitly enable this feature. To configure it, copy the example file and edit
+the local `.env`:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Set `PUBLISH_TO_GITHUB=true` and provide a fine-grained GitHub token in
+`GITHUB_TOKEN_PUBLISH`. The token needs **Contents: read and write** and
+**Actions: write** access to this repository. Restart the app after changing
+`.env`. Never paste the token into the browser or commit `.env`; it is
+gitignored and the app does not log, return, or save the token.
+
+When enabled, the dashboard displays a warning that this GitHub repository is
+public. After a successful local pipeline run, the app publishes only
+`data/clean/train_cleaned_data/daily_total_sales.csv`,
+`data/clean/train_cleaned_data/daily_total_sales_clean.csv`, and
+`data/forecasts/latest_forecast.csv`. The original uploaded CSV/XLSX, `.env`,
+`data/raw/train.csv`, backups, and timestamped forecasts are never published by
+this feature. The app uses an isolated Git worktree, rebases on the latest
+`main` before pushing, then dispatches `data_pipeline.yml` on GitHub Actions.
+Publishing or dispatch errors are shown in the dashboard; local results remain
+available. If the push succeeds but the dispatch fails, the UI indicates that
+the derived files are already public and the workflow must be started manually.

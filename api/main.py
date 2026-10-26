@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from api import jobs
+from api import publishing
 
 
 LOGGER = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ app = FastAPI(
 @app.get("/health")
 def health() -> dict[str, Any]:
     functions = jobs.pipeline_functions()
+    publish_settings = publishing.publish_settings(jobs.REPO_ROOT)
     master_path = functions.MASTER_RAW_PATH
     last_date = None
     if master_path.is_file():
@@ -51,6 +53,8 @@ def health() -> dict[str, Any]:
         "status": "OK",
         "last_data_date": last_date,
         "job_running": jobs.job_manager.is_running(),
+        "publishing_enabled": publish_settings.enabled,
+        "publishing_config_error": publish_settings.error,
     }
 
 

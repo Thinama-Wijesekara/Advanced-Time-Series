@@ -72,6 +72,38 @@
     byId("last-date-chip").textContent = `Latest data ${date ? formatDate(date, { month: "short", day: "numeric" }) : "—"}`;
   }
 
+  function renderPublishingNotice() {
+    const notice = byId("publish-notice");
+    const configError = state.health?.publishing_config_error;
+    if (configError) {
+      notice.textContent = `GitHub publishing is unavailable: ${configError}`;
+      notice.hidden = false;
+    } else if (state.health?.publishing_enabled) {
+      notice.textContent = "GitHub publishing is ON. This repository is public: aggregated daily history, cleaned history, and the latest forecast will be published after each successful upload. Original uploaded files stay local.";
+      notice.hidden = false;
+    } else {
+      notice.hidden = true;
+    }
+  }
+
+  function renderPublishStatus(job) {
+    const box = byId("upload-publish-status");
+    const messages = {
+      publishing: "The local forecast is ready. Publishing only derived daily data and starting the GitHub pipeline…",
+      published: job.publish_message || "Derived outputs were published and the GitHub pipeline was started.",
+      dispatch_failed: job.publish_message || "Derived outputs were published, but GitHub could not start its pipeline.",
+      failed: job.publish_message || "GitHub publishing failed. The local results are still available.",
+    };
+    const message = messages[job.publish_status];
+    if (!message) {
+      box.hidden = true;
+      return;
+    }
+    box.textContent = message;
+    box.className = `message-box ${job.publish_status === "published" ? "success-box" : "warning-box"}`;
+    box.hidden = false;
+  }
+
   function renderSteps(job = null) {
     const list = byId("pipeline-steps");
     const steps = job?.steps || [];
@@ -318,6 +350,7 @@
     state.history = history;
     state.forecast = forecast.rows || [];
     state.forecastCreatedAt = forecast.created_at;
+    renderPublishingNotice();
     setStatus(health.job_running);
     renderKpis();
     renderForecastTable();
@@ -329,6 +362,7 @@
     try {
       const job = await api(`/jobs/${encodeURIComponent(jobId)}`);
       renderSteps(job);
+      renderPublishStatus(job);
       renderUploads(await api("/uploads"));
       if (job.status === "queued" || job.status === "running") {
         state.pollTimer = window.setTimeout(() => pollJob(jobId), 2000);
@@ -336,6 +370,7 @@
       }
       await refreshDashboard();
       renderSteps(job);
+      renderPublishStatus(job);
       if (job.status === "done") {
         const success = byId("upload-success");
         success.textContent = `Upload processed successfully. ${job.days_added} new day${job.days_added === 1 ? "" : "s"} added; forecast updated.`;
@@ -423,6 +458,7 @@
       if (recentJob) {
         const job = await api(`/jobs/${encodeURIComponent(recentJob.job_id)}`);
         renderSteps(job);
+        renderPublishStatus(job);
         if (["queued", "running"].includes(job.status)) {
           await pollJob(job.job_id);
         } else if (job.status === "done") {

@@ -111,6 +111,8 @@ h2 { margin: 0; font-size: 17px; line-height: 1.3; letter-spacing: -0.025em; }
 .message-box { margin-top: 12px; padding: 10px 12px; border-radius: 10px; font-size: 12px; overflow-wrap: anywhere; }
 .error-box { color: #8d2d2d; background: var(--red-soft); border: 1px solid #f6d7d5; }
 .success-box { color: #176752; background: var(--green-soft); border: 1px solid #ccece0; }
+.warning-box, .publish-notice { color: #75520c; background: #fff7e5; border: 1px solid #f1dfa9; }
+.publish-notice { margin: 0 0 18px; }
 
 .subtle-label { color: var(--muted); font-weight: 600; }
 .step-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
