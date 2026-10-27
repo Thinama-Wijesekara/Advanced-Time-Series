@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#f5f7fb">
     <title>Store Sales Forecast | Advanced Time Series</title>
-    <link rel="stylesheet" href="/css/styles.css?v=2">
+    <link rel="stylesheet" href="/css/styles.css?v=4">
     <script src="/vendor/chart.4.6.1.umd.min.js" defer></script>
-    <script src="/js/app.js?v=2" defer></script>
+    <script src="/js/app.js?v=5" defer></script>
   </head>
   <body>
     <header class="topbar">
@@ -109,6 +109,32 @@
           <strong id="kpi-change" class="kpi-value">—</strong>
           <span id="kpi-change-caption" class="kpi-foot">Ensemble forecast compared with actual sales</span>
         </article>
+      </section>
+
+      <section id="runtime-notice" class="runtime-notice" role="status" hidden></section>
+
+      <section class="panel data-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">LOCAL RUNTIME</p>
+            <h2>Data files</h2>
+            <p id="runtime-path" class="section-copy">Runtime directory loading…</p>
+          </div>
+          <button id="rerun-button" class="button button-secondary" type="button">Re-run forecast</button>
+        </div>
+        <div id="live-files" class="live-files" aria-live="polite">
+          <p class="table-placeholder">Loading live data files…</p>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th scope="col">Dated copy</th><th scope="col">Series</th><th scope="col">Through</th><th scope="col">Rows</th><th scope="col">File</th></tr>
+            </thead>
+            <tbody id="dataset-rows">
+              <tr><td class="table-placeholder" colspan="5">Loading dated copies…</td></tr>
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section class="panel chart-panel">

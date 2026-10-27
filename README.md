@@ -95,3 +95,46 @@ Accepted `.csv` and `.xlsx` files must contain `date`, `store_nbr`, `family`,
 and `sales` columns; each accepted upload runs validation, aggregation,
 history merge, cleaning, Ridge/GBM refit, and forecasting in sequence. The
 runtime keeps the latest forecast available if a later job fails.
+
+The runtime is the local source of truth for the dashboard:
+
+- Untouched uploads are stored in `runtime/data/raw/uploads/`.
+- The current master and cleaned series are stored in
+  `runtime/data/clean/train_cleaned_data/`.
+- Immutable dated copies and their JSON metadata are stored beside those
+  live series. `runtime/state/manifest.json` tracks successful uploads and
+  their archive/copy filenames; `runtime/state/jobs.json` stores job status.
+- The dashboard reads current files from disk and offers downloads for dated
+  copies. It checks every five seconds for deleted upload assets or direct
+  edits to the live master/cleaned files, waits for a 15-second quiet period,
+  then queues one rebuild/refit job. A rebuild starts from the tracked daily
+  baseline and replays the remaining upload archives. If an archive cannot
+  continue the contiguous history, it is retained and reported as ignored.
+- The chart/history refreshes when the live data or latest forecast changes.
+  The existing forecast remains in place if a job fails.
+
+For a PowerShell start with a clear port-8000 conflict message:
+
+```powershell
+.\start_app.ps1
+```
+
+Open the runtime files in Explorer/Finder/the system file browser:
+
+```powershell
+python -m api.open_runtime
+```
+
+Reset the runtime data to the repository baseline only when intended. The
+command requires `--confirm`, creates a timestamped backup under
+`runtime/runtime_backups/`, clears upload archives and dated copies from the
+active runtime, resets the manifest and job history, and preserves the
+current forecast by default. Add `--forecast` to clear that forecast too:
+
+```powershell
+python -m api.reset_data --confirm
+python -m api.reset_data --confirm --forecast
+```
+
+The runtime and its backups are local and gitignored. Do not copy client
+uploads or runtime data into Git.

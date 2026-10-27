@@ -35,14 +35,17 @@
     chart: null,
     pollTimer: null,
     health: null,
+    version: null,
+    versionTimer: null,
+    activeJobId: null,
   };
 
   const numberFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
   const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
   const byId = (id) => document.getElementById(id);
 
-  async function api(path, options) {
-    const response = await fetch(path, options);
+  async function api(path, options = {}) {
+    const response = await fetch(path, { cache: "no-store", ...options });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const detail = typeof payload.detail === "string" ? payload.detail : `Request failed (${response.status}).`;
@@ -168,6 +171,68 @@
       row.append(filename, summary, dateRange, statusCell);
       tbody.append(row);
     });
+  }
+
+  function renderDataFiles(status, datasets = []) {
+    byId("runtime-path").textContent = `Runtime directory: ${status.runtime_path || "unavailable"}`;
+    const live = byId("live-files");
+    live.replaceChildren();
+    const labels = ["Master daily totals", "Cleaned daily totals", "Latest forecast"];
+    [...(status.files || []), status.forecast || {}].forEach((file, index) => {
+      const card = document.createElement("div");
+      card.className = "live-file";
+      const title = document.createElement("strong");
+      title.textContent = labels[index] || file.name || "Runtime file";
+      const detail = document.createElement("span");
+      detail.textContent = file.error
+        ? file.error
+        : file.exists
+          ? `${file.rows ?? 0} rows · ${file.first_date || file.first_forecast_date || "—"} to ${file.last_date || "—"}`
+          : "Not available";
+      if (file.error) detail.className = "file-error";
+      card.append(title, detail);
+      live.append(card);
+    });
+
+    const tbody = byId("dataset-rows");
+    tbody.replaceChildren();
+    if (!datasets.length) {
+      const row = document.createElement("tr");
+      row.innerHTML = '<td class="table-placeholder" colspan="5">No dated copies yet.</td>';
+      tbody.append(row);
+      return;
+    }
+    datasets.slice(0, 12).forEach((dataset) => {
+      const row = document.createElement("tr");
+      const name = document.createElement("td");
+      name.textContent = dataset.upload_id || "—";
+      const series = document.createElement("td");
+      series.textContent = dataset.series;
+      const through = document.createElement("td");
+      through.textContent = dataset.through_date || "—";
+      const rows = document.createElement("td");
+      rows.textContent = numberFormat.format(dataset.rows || 0);
+      const download = document.createElement("td");
+      const link = document.createElement("a");
+      link.className = "dataset-link";
+      link.href = dataset.download_url;
+      link.textContent = "Download";
+      download.append(link);
+      row.append(name, series, through, rows, download);
+      tbody.append(row);
+    });
+  }
+
+  function renderRuntimeNotice(status, health) {
+    const notice = byId("runtime-notice");
+    const working = status?.working;
+    notice.hidden = !working && !health?.data_error;
+    notice.className = `runtime-notice${health?.data_error ? " is-error" : working ? " is-warning" : ""}`;
+    if (health?.data_error) {
+      notice.textContent = `Runtime data could not be read: ${health.data_error}`;
+    } else if (working) {
+      notice.textContent = `${working.reason || "A runtime job is running"}${working.job_id ? ` · Job ${working.job_id}` : ""}. Existing forecast remains available until the job succeeds.`;
+    }
   }
 
   function forecastShadePlugin() {
@@ -305,27 +370,48 @@
       },
     });
     byId("chart-empty").hidden = labels.length > 0;
+    if (!labels.length) {
+      byId("chart-empty").textContent = "Sales history and forecast will appear here when available.";
+    }
   }
 
   async function refreshDashboard() {
-    const [health, history, forecast, uploads] = await Promise.all([
-      api("/health"),
-      api("/history?days=365"),
-      api("/forecast/latest"),
+    const health = await api("/health");
+    let history = [];
+    try {
+      history = await api("/history?days=365");
+    } catch (error) {
+      if (!health.data_error && !/Cleaned history is not available/.test(error.message)) {
+        throw error;
+      }
+    }
+    let forecast = { rows: [], created_at: null };
+    try {
+      forecast = await api("/forecast/latest");
+    } catch (error) {
+      if (!/No forecast is available yet/.test(error.message)) throw error;
+    }
+    const [uploads, status, datasets] = await Promise.all([
       api("/uploads"),
+      api("/status"),
+      api("/datasets"),
     ]);
     state.health = health;
     state.history = history;
     state.forecast = forecast.rows || [];
     state.forecastCreatedAt = forecast.created_at;
-    setStatus(health.job_running);
+    setStatus(health.job_running, true);
     renderKpis();
     renderForecastTable();
     renderUploads(uploads);
     renderChart();
+    renderDataFiles(status, datasets);
+    renderRuntimeNotice(status, health);
+    return status;
   }
 
   async function pollJob(jobId) {
+    state.activeJobId = jobId;
     try {
       const job = await api(`/jobs/${encodeURIComponent(jobId)}`);
       renderSteps(job);
@@ -336,6 +422,7 @@
       }
       await refreshDashboard();
       renderSteps(job);
+      state.activeJobId = null;
       if (job.status === "done") {
         const success = byId("upload-success");
         success.textContent = `Upload processed successfully. ${job.days_added} new day${job.days_added === 1 ? "" : "s"} added; forecast updated.`;
@@ -346,6 +433,7 @@
     } catch (error) {
       showUploadError(error.message);
       setStatus(false, false);
+      state.activeJobId = null;
     }
   }
 
@@ -411,6 +499,37 @@
         renderChart();
       });
     });
+    byId("rerun-button").addEventListener("click", async () => {
+      byId("upload-error").hidden = true;
+      try {
+        const result = await api("/rerun", { method: "POST" });
+        await pollJob(result.job_id);
+      } catch (error) {
+        showUploadError(error.message);
+      }
+    });
+  }
+
+  async function pollDataVersion() {
+    try {
+      const result = await api("/data-version");
+      const status = await api("/status");
+      if (state.health) state.health.job_running = Boolean(status.working);
+      renderRuntimeNotice(status, state.health);
+      if (status.working?.job_id && status.working.job_id !== state.activeJobId) {
+        pollJob(status.working.job_id);
+      }
+      if (state.version !== null && state.version !== result.version) {
+        await refreshDashboard();
+      }
+      setStatus(Boolean(status.working));
+      state.version = result.version;
+    } catch (error) {
+      setStatus(false, false);
+      renderRuntimeNotice(null, { data_error: error.message });
+    } finally {
+      state.versionTimer = window.setTimeout(pollDataVersion, 10000);
+    }
   }
 
   async function start() {
@@ -420,7 +539,7 @@
     try {
       await refreshDashboard();
       const recentJob = (await api("/uploads"))[0];
-      if (recentJob) {
+      if (recentJob?.job_id && ["queued", "running"].includes(recentJob.status)) {
         const job = await api(`/jobs/${encodeURIComponent(recentJob.job_id)}`);
         renderSteps(job);
         if (["queued", "running"].includes(job.status)) {
@@ -432,7 +551,17 @@
         } else if (job.status === "failed") {
           showUploadError(job.error || "The most recent pipeline job failed.");
         }
+      } else if (recentJob?.status === "done") {
+        const success = byId("upload-success");
+        success.textContent = `Most recent upload completed successfully. ${recentJob.days_added} new day${recentJob.days_added === 1 ? "" : "s"} added.`;
+        success.hidden = false;
       }
+      const status = await api("/status");
+      if (status.working?.job_id && status.working.job_id !== state.activeJobId) {
+        await pollJob(status.working.job_id);
+      }
+      state.version = (await api("/data-version")).version;
+      pollDataVersion();
     } catch (error) {
       setStatus(false, false);
       byId("chart-empty").hidden = false;

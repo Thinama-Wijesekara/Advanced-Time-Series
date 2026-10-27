@@ -239,6 +239,7 @@ data/clean/train_cleaned_data/*.csv
 models/selected_models/*/versions/
 models/selected_models/*/.tmp_*/
 runtime/
+runtime_backups/
 
 # Notebook and model inference caches.
 **/.ipynb_checkpoints/
