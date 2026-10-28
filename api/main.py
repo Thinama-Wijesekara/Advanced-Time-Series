@@ -280,7 +280,7 @@ def models() -> list[dict[str, str]]:
 
 
 @app.get("/api/batches")
-def batches() -> list[dict[str, Any]]:
+def batches() -> dict[str, Any]:
     try:
         with Session(engine()) as session:
             result = []
