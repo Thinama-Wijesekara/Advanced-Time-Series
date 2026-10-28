@@ -51,7 +51,7 @@ def add_batch(dataframe: pd.DataFrame, source: str, original_file_name: str, rep
         if overlapping and not replace:
             raise ValueError("Upload overlaps existing history; use --replace to replace those dates.")
         result = session.execute(insert(Batch).values(source=source, original_file_name=original_file_name,
-            first_date=first.date(), last_date=last.date(), rows=len(frame), status="accepted", message=None).returning(Batch.batch_id))
+            first_date=first.date(), last_date=last.date(), rows=len(frame), status="pending", message=None).returning(Batch.batch_id))
         batch_id = result.scalar_one()
         session.execute(insert(SalesNew), [dict(batch_id=batch_id, date=row.date.to_pydatetime().date(),
             store_nbr=int(row.store_nbr), family=str(row.family), sales=round(float(row.sales), 3),

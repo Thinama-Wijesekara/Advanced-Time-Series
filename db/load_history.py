@@ -84,7 +84,7 @@ def _build_clean_series(engine, daily: pd.DataFrame) -> pd.DataFrame:
             source = PROJECT_ROOT / "data" / "reference" / name
             (reference_dir / name).write_bytes(source.read_bytes())
         daily_file = master_dir / "daily_total_sales.csv"
-        daily.to_csv(daily_file, index=False, date_format="%Y-%m-%d")
+        daily.rename(columns={"date": "timestamp_utc"}).to_csv(daily_file, index=False, date_format="%Y-%m-%d")
         script = "from pipeline.functions import preprocess; preprocess()"
         env = os.environ.copy()
         env["STORE_SALES_DATA_DIR"] = str(data_dir)

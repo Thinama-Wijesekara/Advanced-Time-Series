@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import secrets
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -105,7 +105,7 @@ def _run_data(run_id: int) -> None:
             rows = session.execute(select(SalesNew).where(SalesNew.status == "pending").order_by(SalesNew.id)).scalars().all()
             batch_ids = sorted({row.batch_id for row in rows if row.batch_id is not None})
             records = [{"date": row.date.isoformat(), "store_nbr": row.store_nbr, "family": row.family, "sales": float(row.sales), "onpromotion": row.onpromotion} for row in rows]
-            session.execute(update(Run).where(Run.run_id == run_id).values(status="running", step="Read pending data", started_at=datetime.utcnow()))
+            session.execute(update(Run).where(Run.run_id == run_id).values(status="running", step="Read pending data", started_at=datetime.now(timezone.utc)))
             session.commit()
         for step in ("Aggregate by date", "Merge into history", "Clean the series", "Refit calendar and gradient boosting"):
             with Session(engine()) as session:
@@ -115,12 +115,12 @@ def _run_data(run_id: int) -> None:
         with Session(engine()) as session:
             session.execute(update(SalesNew).where(SalesNew.status == "pending").values(status="processed"))
             session.execute(update(Batch).where(Batch.batch_id.in_(batch_ids)).values(status="processed", message=None))
-            session.execute(update(Run).where(Run.run_id == run_id).values(status="done", step="Completed", finished_at=datetime.utcnow(), message=None))
+            session.execute(update(Run).where(Run.run_id == run_id).values(status="done", step="Completed", finished_at=datetime.now(timezone.utc), message=None))
             session.commit()
     except Exception as exc:
         message = str(exc)
         with Session(engine()) as session:
-            session.execute(update(Run).where(Run.run_id == run_id).values(status="failed", finished_at=datetime.utcnow(), message=message))
+            session.execute(update(Run).where(Run.run_id == run_id).values(status="failed", finished_at=datetime.now(timezone.utc), message=message))
             session.execute(update(Batch).where(Batch.batch_id.in_(batch_ids if 'batch_ids' in locals() else [])).values(status="failed", message=message))
             session.execute(update(SalesNew).where(SalesNew.status == "pending", SalesNew.batch_id.in_(batch_ids if 'batch_ids' in locals() else [])).values(status="failed"))
             session.commit()
@@ -170,11 +170,11 @@ def _run_forecast(run_id: int, model: str) -> None:
     try:
         _forecast_model(model)
         with Session(engine()) as session:
-            session.execute(update(Run).where(Run.run_id == run_id).values(status="done", step="Completed", finished_at=datetime.utcnow(), message=None))
+            session.execute(update(Run).where(Run.run_id == run_id).values(status="done", step="Completed", finished_at=datetime.now(timezone.utc), message=None))
             session.commit()
     except Exception as exc:
         with Session(engine()) as session:
-            session.execute(update(Run).where(Run.run_id == run_id).values(status="failed", finished_at=datetime.utcnow(), message=str(exc)))
+            session.execute(update(Run).where(Run.run_id == run_id).values(status="failed", finished_at=datetime.now(timezone.utc), message=str(exc)))
             session.commit()
     finally:
         with LOCK:
@@ -193,6 +193,7 @@ def model_forecast(payload: dict[str, str], _key: str = Depends(require_api_key)
 
 
 def _forecast_model(model: str) -> int:
+    import importlib
     from pipeline import functions
     with Session(engine()) as session:
         version = latest_version(session)
@@ -207,6 +208,7 @@ def _forecast_model(model: str) -> int:
     import os
     os.environ["STORE_SALES_DATA_DIR"] = str(work)
     os.environ["STORE_SALES_MODEL_DIR"] = str(os_model)
+    functions = importlib.reload(functions)
     pipelines = None
     if model != "level_calendar_no_model":
         from api.services import get_chronos_pipeline
@@ -238,7 +240,7 @@ def run_status(run_id: int) -> dict[str, Any]:
 
 
 @app.get("/api/history")
-def history(days: int = Query(default=365, ge=1)) -> list[dict[str, Any]]:
+def history(days: int = Query(default=365, ge=1)) -> dict[str, Any]:
     try:
         with Session(engine()) as session:
             rows = session.execute(select(CleanSeries).order_by(CleanSeries.date.desc()).limit(days)).scalars().all()

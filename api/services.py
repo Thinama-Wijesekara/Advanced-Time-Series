@@ -39,7 +39,7 @@ def db_error(exc: Exception) -> dict[str, Any]:
 
 
 def latest_version(session: Session):
-    return session.execute(select(DataVersion).order_by(DataVersion.data_version.desc())).scalar_one_or_none()
+    return session.execute(select(DataVersion).order_by(DataVersion.data_version.desc()).limit(1)).scalar_one_or_none()
 
 
 def batch_pending(session: Session) -> tuple[list[dict[str, Any]], list[int]]:
@@ -68,15 +68,16 @@ def run_record(session: Session, kind: str, model: str | None = None, batch_ids:
 
 
 def data_workflow(records: list[dict[str, Any]]) -> int:
+    import importlib
     from pipeline import functions as pipeline_functions
 
     work = PROJECT_ROOT / "runtime" / "work"
     data_dir = work / "data"
     model_dir = work / "models"
     shutil.rmtree(work, ignore_errors=True)
-    (data_dir / "raw").mkdir(parents=True)
-    (data_dir / "clean" / "train_cleaned_data").mkdir(parents=True)
-    (data_dir / "reference").mkdir(parents=True)
+    (data_dir / "raw").mkdir(parents=True, exist_ok=True)
+    (data_dir / "clean" / "train_cleaned_data").mkdir(parents=True, exist_ok=True)
+    (data_dir / "reference").mkdir(parents=True, exist_ok=True)
     for name in ("holidays_events.csv", "stores.csv"):
         shutil.copy2(PROJECT_ROOT / "data" / "reference" / name, data_dir / "reference" / name)
 
@@ -89,6 +90,7 @@ def data_workflow(records: list[dict[str, Any]]) -> int:
     upload["date"] = pd.to_datetime(upload["date"])
     os.environ["STORE_SALES_DATA_DIR"] = str(data_dir)
     os.environ["STORE_SALES_MODEL_DIR"] = str(model_dir)
+    pipeline_functions = importlib.reload(pipeline_functions)
     # Prepare a model copy and version directory without modifying tracked models.
     shutil.copytree(PROJECT_ROOT / "models" / "selected_models", model_dir, ignore=shutil.ignore_patterns("versions", ".tmp_*"))
 
@@ -98,8 +100,8 @@ def data_workflow(records: list[dict[str, Any]]) -> int:
     expected = pipeline_functions._expected_store_count() * len(pd.read_csv(PROJECT_ROOT / "data" / "reference" / "stores.csv"))
     pipeline_functions._expected_store_count() if False else None
     daily = pipeline_functions.aggregate_upload(normalized)
-    master = pd.DataFrame(pd.read_csv(data_dir / "clean" / "train_cleaned_data" / "daily_total_sales.csv")).rename(columns={"timestamp_utc": "date"})
-    merged = pd.concat([master.assign(timestamp_utc=pd.to_datetime(master["date"])), daily[["timestamp_utc", "sales"]]], ignore_index=True)
+    master = pd.DataFrame(pd.read_csv(data_dir / "clean" / "train_cleaned_data" / "daily_total_sales.csv", parse_dates=["timestamp_utc"])[["timestamp_utc", "sales"]])
+    merged = pd.concat([master, daily[["timestamp_utc", "sales"]]], ignore_index=True)
     merged = merged.drop_duplicates("timestamp_utc", keep="last").sort_values("timestamp_utc")
     merged.rename(columns={"timestamp_utc": "timestamp_utc"}).to_csv(data_dir / "clean" / "train_cleaned_data" / "daily_total_sales.csv", index=False, date_format="%Y-%m-%d")
     pipeline_functions.preprocess()
