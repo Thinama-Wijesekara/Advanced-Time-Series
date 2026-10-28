@@ -716,113 +716,108 @@ def forecast(
             raise ValueError(
                 f"{model_name}/model_info.json must not reference a Chronos model."
             )
-    needs_chronos = bool(set(model_infos) & {LARGE_ZERO_SHOT, LARGE_ENSEMBLE})
+    needs_chronos = model_id is None or model_id in {LARGE_ZERO_SHOT, LARGE_ENSEMBLE}
     if needs_chronos and pipelines is None:
         pipelines, _, _ = _load_chronos_pipelines(model_infos)
 
-    zero_info = model_infos[LARGE_ZERO_SHOT] if LARGE_ZERO_SHOT in model_infos else model_infos[LARGE_ENSEMBLE] if LARGE_ENSEMBLE in model_infos else None
-    zero_model_id = zero_info["huggingface_name"]
-    zero_context = int(zero_info["context"])
-    zero_horizon = int(zero_info["horizon"])
-    zero_samples = int(zero_info.get("num_samples", settings["num_samples"]))
-    zero_seed = int(zero_info.get("seed", settings["seed"]))
+    output_frames = []
+    if model_id in (None, LARGE_ZERO_SHOT, LARGE_ENSEMBLE):
+        zero_info = model_infos[LARGE_ZERO_SHOT]
+        zero_model_id = zero_info["huggingface_name"]
+        zero_context = int(zero_info["context"])
+        zero_horizon = int(zero_info["horizon"])
+        zero_samples = int(zero_info.get("num_samples", settings["num_samples"]))
+        zero_seed = int(zero_info.get("seed", settings["seed"]))
 
-    future_dates = pd.date_range(dates[-1] + pd.Timedelta(days=1), periods=zero_horizon, freq="D")
-    xcal_history = Xcal(dates)
-    xcal_future = Xcal(pd.DatetimeIndex(future_dates))
-    ly = np.log1p(y)
-    zero_effect_estimator = joblib.load(
-        _newest_model_dir(LARGE_ENSEMBLE) / "calendar_ridge_train.joblib"
-    )
-    cal_history = zero_effect_estimator.predict(xcal_history)
-    cal_future = zero_effect_estimator.predict(xcal_future)
-    y_adjusted = np.expm1(ly - cal_history)
-    context = ctx_windows(
-        y_adjusted,
-        "future",
-        {"future": [len(y_adjusted)]},
-        zero_context,
-    )
-    large_adjusted = back(
-        predict_all(
-            pipelines[zero_model_id],
-            context,
-            zero_horizon,
-            zero_samples,
-            zero_seed,
-            settings["prediction_batch_size"],
-        ),
-        cal_future.reshape(1, -1),
-    )
-
-    output_frames = [
-        pd.DataFrame(
-            {
+        future_dates = pd.date_range(
+            dates[-1] + pd.Timedelta(days=1), periods=zero_horizon, freq="D"
+        )
+        xcal_history = Xcal(dates)
+        xcal_future = Xcal(pd.DatetimeIndex(future_dates))
+        ly = np.log1p(y)
+        zero_effect_estimator = joblib.load(
+            _newest_model_dir(LARGE_ENSEMBLE) / "calendar_ridge_train.joblib"
+        )
+        cal_history = zero_effect_estimator.predict(xcal_history)
+        cal_future = zero_effect_estimator.predict(xcal_future)
+        y_adjusted = np.expm1(ly - cal_history)
+        context = ctx_windows(
+            y_adjusted,
+            "future",
+            {"future": [len(y_adjusted)]},
+            zero_context,
+        )
+        large_adjusted = back(
+            predict_all(
+                pipelines[zero_model_id], context, zero_horizon, zero_samples,
+                zero_seed, settings["prediction_batch_size"],
+            ),
+            cal_future.reshape(1, -1),
+        )
+        if model_id in (None, LARGE_ZERO_SHOT):
+            output_frames.append(pd.DataFrame({
                 "date": future_dates,
                 "model": LARGE_ZERO_SHOT,
                 "forecast": large_adjusted.reshape(-1),
-            }
-        )
-    ]
-    info = model_infos[LARGE_ENSEMBLE]
-    context_length = int(info["context"])
-    horizon = int(info["horizon"])
-    num_samples = int(info.get("num_samples", settings["num_samples"]))
-    seed = int(info.get("seed", settings["seed"]))
-    if context_length != zero_context or horizon != zero_horizon:
-        raise ValueError("Large ensemble settings do not match the large zero-shot model settings.")
+            }))
 
-    model_dir = _newest_model_dir(LARGE_ENSEMBLE)
-    gbm = joblib.load(model_dir / "gbm.joblib")
-    ridge = joblib.load(model_dir / "calendar_ridge_train.joblib")
-    ensemble_cal_future = ridge.predict(xcal_future)
-    ensemble_cal_history = ridge.predict(xcal_history)
-    adjusted_history = np.expm1(ly - ensemble_cal_history)
-    ensemble_context = ctx_windows(
-        adjusted_history,
-        "future",
-        {"future": [len(adjusted_history)]},
-        context_length,
-    )
-    chronos_adjusted = large_adjusted.copy()
-    F, L = _future_gbm_rows(
-        y,
-        pd.DatetimeIndex(future_dates),
-        horizon,
-        settings["level_lookback"],
-    )
-    gbm_forecast = np.expm1(gbm.predict(F) + L).reshape(1, -1)
-    weights = info["ensemble_weights"]
-    ensemble_forecast = (
-        float(weights["chronos"]) * chronos_adjusted
-        + float(weights["gbm"]) * gbm_forecast
-    )
-    output_frames.append(
-        pd.DataFrame(
-            {
-                "date": future_dates,
-                "model": LARGE_ENSEMBLE,
-                "forecast": ensemble_forecast.reshape(-1),
-            }
-        )
-    )
+    if model_id in (None, LARGE_ENSEMBLE):
+        info = model_infos[LARGE_ENSEMBLE]
+        context_length = int(info["context"])
+        horizon = int(info["horizon"])
+        num_samples = int(info.get("num_samples", settings["num_samples"]))
+        seed = int(info.get("seed", settings["seed"]))
+        if context_length != zero_context or horizon != zero_horizon:
+            raise ValueError("Large ensemble settings do not match the large zero-shot model settings.")
 
-    baseline_model_dir = _newest_model_dir(LEVEL_CALENDAR)
-    baseline_ridge = joblib.load(baseline_model_dir / "calendar_ridge_train_valid.joblib")
-    baseline_history_effect = baseline_ridge.predict(xcal_history)
-    baseline_future_effect = baseline_ridge.predict(xcal_future)
-    lookback = int(settings["level_lookback"])
-    baseline_level = (ly[-lookback:] - baseline_history_effect[-lookback:]).mean()
-    baseline_forecast = np.expm1(baseline_level + baseline_future_effect)
-    output_frames.append(
-        pd.DataFrame(
-            {
-                "date": future_dates,
-                "model": LEVEL_CALENDAR,
-                "forecast": baseline_forecast,
-            }
+        model_dir = _newest_model_dir(LARGE_ENSEMBLE)
+        gbm = joblib.load(model_dir / "gbm.joblib")
+        ridge = joblib.load(model_dir / "calendar_ridge_train.joblib")
+        ensemble_cal_future = ridge.predict(xcal_future)
+        ensemble_cal_history = ridge.predict(xcal_history)
+        adjusted_history = np.expm1(ly - ensemble_cal_history)
+        ensemble_context = ctx_windows(
+            adjusted_history,
+            "future",
+            {"future": [len(adjusted_history)]},
+            context_length,
         )
-    )
+        chronos_adjusted = large_adjusted.copy()
+        F, L = _future_gbm_rows(
+            y, pd.DatetimeIndex(future_dates), horizon,
+            settings["level_lookback"],
+        )
+        gbm_forecast = np.expm1(gbm.predict(F) + L).reshape(1, -1)
+        weights = info["ensemble_weights"]
+        ensemble_forecast = (
+            float(weights["chronos"])
+            * chronos_adjusted
+            + float(weights["gbm"])
+            * gbm_forecast
+        )
+        output_frames.append(pd.DataFrame({
+            "date": future_dates,
+            "model": LARGE_ENSEMBLE,
+            "forecast": ensemble_forecast.reshape(-1),
+        }))
+
+    if model_id is None or model_id == LEVEL_CALENDAR:
+        baseline_model_dir = _newest_model_dir(LEVEL_CALENDAR)
+        baseline_ridge = joblib.load(baseline_model_dir / "calendar_ridge_train_valid.joblib")
+        baseline_history_effect = baseline_ridge.predict(xcal_history)
+        baseline_future_effect = baseline_ridge.predict(xcal_future)
+        lookback = int(settings["level_lookback"])
+        baseline_level = (ly[-lookback:] - baseline_history_effect[-lookback:]).mean()
+        baseline_forecast = np.expm1(baseline_level + baseline_future_effect)
+        output_frames.append(
+            pd.DataFrame(
+                {
+                    "date": future_dates,
+                    "model": LEVEL_CALENDAR,
+                    "forecast": baseline_forecast,
+                }
+            )
+        )
 
     forecast_df = pd.concat(output_frames, ignore_index=True)
     expected_models = {LARGE_ZERO_SHOT, LARGE_ENSEMBLE, LEVEL_CALENDAR}
