@@ -1,574 +1,139 @@
-(() => {
+﻿(() => {
   "use strict";
-
-  const MODEL_IDS = {
-    zeroShot: "chronos_t5_large_zero_shot_adjusted",
-    ensemble: "ensemble_chronos_t5_large_gbm_w0.7_2",
-    level: "level_calendar_no_model",
-  };
-  const MODEL_NAMES = {
-    [MODEL_IDS.zeroShot]: "Chronos-large zero-shot",
-    [MODEL_IDS.ensemble]: "Chronos-large + GBM ensemble",
-    [MODEL_IDS.level]: "Level + calendar",
-  };
-  const STEP_NAMES = [
-    "Validate and archive upload",
-    "Aggregate sales by date",
-    "Merge into full history",
-    "Clean the full daily series",
-    "Refit calendar and GBM models",
-    "Forecast the next 16 days",
-  ];
-  const COLORS = {
-    actual: "#8c9caf",
-    newlyAdded: "#28a77f",
-    zeroShot: "#8192ad",
-    ensemble: "#3269e8",
-    level: "#d18b36",
-  };
-
-  const state = {
-    history: [],
-    forecast: [],
-    forecastCreatedAt: null,
-    range: 90,
-    chart: null,
-    pollTimer: null,
-    health: null,
-    version: null,
-    versionTimer: null,
-    activeJobId: null,
-  };
-
-  const numberFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
-  const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-  const byId = (id) => document.getElementById(id);
-
+  const IDS = { zero: "chronos_t5_large_zero_shot_adjusted", ensemble: "ensemble_chronos_t5_large_gbm_w0.7_2", level: "level_calendar_no_model" };
+  const names = { [IDS.zero]: "Chronos-large zero-shot", [IDS.ensemble]: "Chronos-large + GBM ensemble", [IDS.level]: "Level + calendar" };
+  const colors = { actual: "#7c91a8", new: "#24a47d", forecast: "#3269e8" };
+  let model = localStorage.getItem("selectedModel") || IDS.level;
+  if (!Object.values(IDS).includes(model)) model = IDS.level;
+  let chart = null, pendingTimer = null;
+  const $ = id => document.getElementById(id);
   async function api(path, options = {}) {
     const response = await fetch(path, { cache: "no-store", ...options });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const detail = typeof payload.detail === "string" ? payload.detail : `Request failed (${response.status}).`;
-      throw new Error(detail);
-    }
+    if (!response.ok) throw new Error(payload.detail || payload.database_error || `Request failed (${response.status})`);
     return payload;
   }
+  const money = value => Number.isFinite(Number(value)) ? new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value) : "—";
+  const dateLabel = value => value ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }).format(new Date(`${value}T00:00:00Z`)) : "—";
 
-  function formatDate(isoDate, options = { month: "short", day: "numeric", year: "numeric" }) {
-    if (!isoDate) return "—";
-    return new Intl.DateTimeFormat("en-US", { ...options, timeZone: "UTC" }).format(new Date(`${isoDate}T00:00:00Z`));
-  }
-
-  function weekday(isoDate) {
-    return dayNames[new Date(`${isoDate}T00:00:00Z`).getUTCDay()];
-  }
-
-  function money(value) {
-    return Number.isFinite(value) ? numberFormat.format(value) : "—";
-  }
-
-  function setStatus(running, connected = true) {
-    const chip = byId("connection-chip");
-    chip.className = `status-chip ${connected ? (running ? "status-running" : "") : "status-error"}`;
-    chip.innerHTML = `<span class="status-dot"></span>${connected ? (running ? "Job running" : "System ready") : "Connection issue"}`;
-    const date = state.health?.last_data_date;
-    byId("last-date-chip").textContent = `Latest data ${date ? formatDate(date, { month: "short", day: "numeric" }) : "—"}`;
-  }
-
-  function renderSteps(job = null) {
-    const list = byId("pipeline-steps");
-    const steps = job?.steps || [];
-    list.replaceChildren();
-    STEP_NAMES.forEach((name, index) => {
-      const step = steps[index];
-      const status = step?.status || "waiting";
-      const row = document.createElement("li");
-      row.className = `step-row ${status === "running" ? "is-running" : ""} ${status === "done" ? "is-done" : ""} ${status === "failed" ? "is-failed" : ""}`;
-      const marker = document.createElement("span");
-      marker.className = "step-marker";
-      marker.textContent = status === "done" ? "✓" : status === "failed" ? "!" : String(index + 1);
-      const title = document.createElement("span");
-      title.textContent = name;
-      const time = document.createElement("span");
-      time.className = "step-time";
-      time.textContent = Number.isFinite(step?.seconds) ? `${step.seconds.toFixed(1)}s` : "";
-      row.append(marker, title, time);
-      list.append(row);
-    });
-    byId("job-status-label").textContent = job ? job.status[0].toUpperCase() + job.status.slice(1) : "Ready";
-    setStatus(job ? ["queued", "running"].includes(job.status) : false);
-  }
-
-  function renderKpis() {
-    const last = state.history.at(-1);
-    byId("kpi-last-date").textContent = last ? formatDate(last.date, { month: "short", day: "numeric", year: "numeric" }) : "—";
-    const ensemble = state.forecast.filter((row) => row.model === MODEL_IDS.ensemble);
-    const total = ensemble.reduce((sum, row) => sum + row.forecast, 0);
-    byId("kpi-total").textContent = ensemble.length ? money(total) : "—";
-    byId("kpi-average").textContent = ensemble.length ? money(total / ensemble.length) : "—";
-    const previous = state.history.slice(-16);
-    const actualTotal = previous.reduce((sum, row) => sum + row.sales, 0);
-    const change = ensemble.length === 16 && actualTotal > 0 ? ((total / actualTotal) - 1) * 100 : null;
-    const changeValue = byId("kpi-change");
-    changeValue.textContent = change === null ? "—" : `${change >= 0 ? "+" : ""}${change.toFixed(1)}%`;
-    changeValue.classList.toggle("kpi-positive", change !== null && change >= 0);
-    changeValue.classList.toggle("kpi-negative", change !== null && change < 0);
-    byId("kpi-change-caption").textContent = `Ensemble model vs. previous 16 days actual sales`;
-  }
-
-  function renderForecastTable() {
-    const tbody = byId("forecast-rows");
-    tbody.replaceChildren();
-    if (!state.forecast.length) {
-      const row = document.createElement("tr");
-      row.innerHTML = '<td class="table-placeholder" colspan="5">No forecast is available yet.</td>';
-      tbody.append(row);
-      return;
-    }
-    const dates = [...new Set(state.forecast.map((row) => row.date))].sort();
-    const lookup = new Map(state.forecast.map((row) => [`${row.date}|${row.model}`, row.forecast]));
-    dates.forEach((date) => {
-      const tr = document.createElement("tr");
-      [formatDate(date), weekday(date), ...Object.values(MODEL_IDS).map((model) => money(lookup.get(`${date}|${model}`)))].forEach((value) => {
-        const td = document.createElement("td");
-        td.textContent = value;
-        tr.append(td);
-      });
-      tbody.append(tr);
-    });
-    byId("forecast-made-at").textContent = state.forecastCreatedAt
-      ? `Forecast made ${new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(state.forecastCreatedAt))}`
-      : "Forecast time unavailable";
-  }
-
-  function renderUploads(uploads = []) {
-    const tbody = byId("upload-rows");
-    tbody.replaceChildren();
-    if (!uploads.length) {
-      const row = document.createElement("tr");
-      row.innerHTML = '<td class="table-placeholder" colspan="4">No uploads yet.</td>';
-      tbody.append(row);
-      return;
-    }
-    uploads.slice(0, 8).forEach((upload) => {
-      const row = document.createElement("tr");
-      const filename = document.createElement("td");
-      filename.className = "file-name-cell";
-      filename.title = upload.original_file_name || "";
-      const createdAt = upload.created_at ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(upload.created_at)) : "—";
-      filename.textContent = `${upload.original_file_name || "Upload"} · ${createdAt}`;
-      const summary = document.createElement("td");
-      summary.textContent = `${numberFormat.format(upload.rows ?? 0)} rows · ${upload.days_added ?? 0} days`;
-      const dateRange = document.createElement("td");
-      dateRange.textContent = upload.first_date_added && upload.last_date_added
-        ? `${formatDate(upload.first_date_added, { month: "short", day: "numeric" })} – ${formatDate(upload.last_date_added, { month: "short", day: "numeric", year: "numeric" })}`
-        : "No new dates";
-      const statusCell = document.createElement("td");
-      const badge = document.createElement("span");
-      badge.className = `upload-status ${upload.status}`;
-      badge.textContent = upload.status;
-      statusCell.append(badge);
-      row.append(filename, summary, dateRange, statusCell);
-      tbody.append(row);
-    });
-  }
-
-  function renderDataFiles(status, datasets = []) {
-    byId("runtime-path").textContent = `Runtime directory: ${status.runtime_path || "unavailable"}`;
-    const live = byId("live-files");
-    live.replaceChildren();
-    const labels = ["Master daily totals", "Cleaned daily totals", "Latest forecast"];
-    [...(status.files || []), status.forecast || {}].forEach((file, index) => {
-      const card = document.createElement("div");
-      card.className = "live-file";
-      const title = document.createElement("strong");
-      title.textContent = labels[index] || file.name || "Runtime file";
-      const detail = document.createElement("span");
-      detail.textContent = file.error
-        ? file.error
-        : file.exists
-          ? `${file.rows ?? 0} rows · ${file.first_date || file.first_forecast_date || "—"} to ${file.last_date || "—"}`
-          : "Not available";
-      if (file.error) detail.className = "file-error";
-      card.append(title, detail);
-      live.append(card);
-    });
-
-    const tbody = byId("dataset-rows");
-    tbody.replaceChildren();
-    if (!datasets.length) {
-      const row = document.createElement("tr");
-      row.innerHTML = '<td class="table-placeholder" colspan="5">No dated copies yet.</td>';
-      tbody.append(row);
-      return;
-    }
-    datasets.slice(0, 12).forEach((dataset) => {
-      const row = document.createElement("tr");
-      const name = document.createElement("td");
-      name.textContent = dataset.upload_id || "—";
-      const series = document.createElement("td");
-      series.textContent = dataset.series;
-      const through = document.createElement("td");
-      through.textContent = dataset.through_date || "—";
-      const rows = document.createElement("td");
-      rows.textContent = numberFormat.format(dataset.rows || 0);
-      const download = document.createElement("td");
-      const link = document.createElement("a");
-      link.className = "dataset-link";
-      link.href = dataset.download_url;
-      link.textContent = "Download";
-      download.append(link);
-      row.append(name, series, through, rows, download);
-      tbody.append(row);
-    });
-  }
-
-  function renderRuntimeNotice(status, health) {
-    const notice = byId("runtime-notice");
-    const working = status?.working;
-    notice.hidden = !working && !health?.data_error;
-    notice.className = `runtime-notice${health?.data_error ? " is-error" : working ? " is-warning" : ""}`;
-    if (health?.data_error) {
-      notice.textContent = `Runtime data could not be read: ${health.data_error}`;
-    } else if (working) {
-      notice.textContent = `${working.reason || "A runtime job is running"}${working.job_id ? ` · Job ${working.job_id}` : ""}. Existing forecast remains available until the job succeeds.`;
-    }
-  }
-
-  function forecastShadePlugin() {
-    return {
-      id: "forecastShade",
-      beforeDatasetsDraw(chart) {
-        const firstForecast = state.forecast.map((row) => row.date).sort()[0];
-        const lastActual = state.history.at(-1)?.date;
-        if (!firstForecast || !lastActual || !chart.chartArea) return;
-        const xScale = chart.scales.x;
-        const forecastX = xScale.getPixelForValue(firstForecast);
-        const previousX = xScale.getPixelForValue(lastActual);
-        if (!Number.isFinite(forecastX) || !Number.isFinite(previousX)) return;
-        const divider = (forecastX + previousX) / 2;
-        const { ctx, chartArea } = chart;
-        ctx.save();
-        ctx.fillStyle = "rgba(50, 105, 232, 0.055)";
-        ctx.fillRect(divider, chartArea.top, chartArea.right - divider, chartArea.bottom - chartArea.top);
-        ctx.strokeStyle = "rgba(50, 105, 232, 0.36)";
-        ctx.setLineDash([4, 4]);
-        ctx.beginPath();
-        ctx.moveTo(divider, chartArea.top);
-        ctx.lineTo(divider, chartArea.bottom);
-        ctx.stroke();
-        ctx.setLineDash([]);
-        ctx.fillStyle = "#6680ad";
-        ctx.font = "600 10px Inter, system-ui, sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText("Forecast (next 16 days)", divider + (chartArea.right - divider) / 2, chartArea.top + 13);
-        ctx.restore();
-      },
-    };
-  }
-
-  function renderChart() {
-    const canvas = byId("sales-chart");
-    const history = state.history.slice(-state.range);
-    const forecastDates = [...new Set(state.forecast.map((row) => row.date))].sort();
-    const labels = [...history.map((row) => row.date), ...forecastDates];
-    const historyByDate = new Map(history.map((row) => [row.date, row]));
-    const forecastByModel = new Map();
-    state.forecast.forEach((row) => {
-      if (!forecastByModel.has(row.model)) forecastByModel.set(row.model, new Map());
-      forecastByModel.get(row.model).set(row.date, row.forecast);
-    });
-    const datasets = [
-      {
-        label: "Actual sales",
-        data: labels.map((date) => historyByDate.has(date) && !historyByDate.get(date).is_new ? historyByDate.get(date).sales : null),
-        borderColor: COLORS.actual,
-        backgroundColor: COLORS.actual,
-        borderWidth: 2,
-        pointRadius: 0,
-        pointHitRadius: 9,
-        tension: 0.22,
-        spanGaps: false,
-      },
-    ];
-    if (history.some((row) => row.is_new)) {
-      datasets.push({
-        label: "Newly added data",
-        data: labels.map((date) => historyByDate.get(date)?.is_new ? historyByDate.get(date).sales : null),
-        borderColor: COLORS.newlyAdded,
-        backgroundColor: COLORS.newlyAdded,
-        borderWidth: 3,
-        pointRadius: 2,
-        pointHitRadius: 9,
-        tension: 0.22,
-        spanGaps: false,
-      });
-    }
-    [
-      { id: MODEL_IDS.zeroShot, color: COLORS.zeroShot, dash: [5, 4], width: 1.8 },
-      { id: MODEL_IDS.ensemble, color: COLORS.ensemble, dash: [], width: 3.2 },
-      { id: MODEL_IDS.level, color: COLORS.level, dash: [8, 4], width: 1.8 },
-    ].forEach(({ id, color, dash, width }) => {
-      const values = forecastByModel.get(id);
-      datasets.push({
-        label: MODEL_NAMES[id],
-        data: labels.map((date) => values?.has(date) ? values.get(date) : null),
-        borderColor: color,
-        backgroundColor: color,
-        borderWidth: width,
-        borderDash: dash,
-        pointRadius: 0,
-        pointHitRadius: 9,
-        tension: 0.2,
-        spanGaps: false,
-      });
-    });
-    if (state.chart) state.chart.destroy();
-    state.chart = new Chart(canvas, {
-      type: "line",
-      data: { labels, datasets },
-      plugins: [forecastShadePlugin()],
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: { mode: "index", intersect: false },
-        plugins: {
-          legend: {
-            position: "bottom",
-            labels: { usePointStyle: true, pointStyle: "line", boxWidth: 23, boxHeight: 8, padding: 18, color: "#64748b", font: { size: 10 } },
-          },
-          tooltip: {
-            backgroundColor: "#17263d",
-            padding: 11,
-            titleFont: { size: 11, weight: "600" },
-            bodyFont: { size: 11 },
-            callbacks: {
-              title(items) {
-                const date = items[0]?.label;
-                return date ? `${formatDate(date)} · ${weekday(date)}` : "";
-              },
-              label(context) {
-                return `${context.dataset.label}: ${money(context.parsed.y)}`;
-              },
-            },
-          },
-        },
-        scales: {
-          x: {
-            type: "category",
-            grid: { display: false },
-            ticks: { color: "#8996a7", maxTicksLimit: 12, maxRotation: 0, font: { size: 9 } },
-            title: { display: true, text: "Date", color: "#78869a", font: { size: 10, weight: "600" } },
-          },
-          y: {
-            beginAtZero: false,
-            grid: { color: "rgba(223, 230, 239, 0.7)" },
-            ticks: { color: "#8996a7", callback: (value) => numberFormat.format(value), font: { size: 9 } },
-            title: { display: true, text: "Total daily sales", color: "#78869a", font: { size: 10, weight: "600" } },
-          },
-        },
-      },
-    });
-    byId("chart-empty").hidden = labels.length > 0;
-    if (!labels.length) {
-      byId("chart-empty").textContent = "Sales history and forecast will appear here when available.";
-    }
-  }
-
-  async function refreshDashboard() {
-    const health = await api("/health");
-    let history = [];
+  async function refreshHealth() {
     try {
-      history = await api("/history?days=365");
+      const health = await api("/health");
+      $("connection-chip").className = "status-chip";
+      $("connection-chip").textContent = "Connected";
+      $("data-chip").hidden = Boolean(health.database_ok);
+      if (!health.database_ok) $("data-chip-text").textContent = health.database_error || "Database error";
+      $("last-date-chip").textContent = `Latest data ${health.last_data_date ? dateLabel(health.last_data_date) : "—"}`;
     } catch (error) {
-      if (!health.data_error && !/Cleaned history is not available/.test(error.message)) {
-        throw error;
-      }
-    }
-    let forecast = { rows: [], created_at: null };
-    try {
-      forecast = await api("/forecast/latest");
-    } catch (error) {
-      if (!/No forecast is available yet/.test(error.message)) throw error;
-    }
-    const [uploads, status, datasets] = await Promise.all([
-      api("/uploads"),
-      api("/status"),
-      api("/datasets"),
-    ]);
-    state.health = health;
-    state.history = history;
-    state.forecast = forecast.rows || [];
-    state.forecastCreatedAt = forecast.created_at;
-    setStatus(health.job_running, true);
-    renderKpis();
-    renderForecastTable();
-    renderUploads(uploads);
-    renderChart();
-    renderDataFiles(status, datasets);
-    renderRuntimeNotice(status, health);
-    return status;
-  }
-
-  async function pollJob(jobId) {
-    state.activeJobId = jobId;
-    try {
-      const job = await api(`/jobs/${encodeURIComponent(jobId)}`);
-      renderSteps(job);
-      renderUploads(await api("/uploads"));
-      if (job.status === "queued" || job.status === "running") {
-        state.pollTimer = window.setTimeout(() => pollJob(jobId), 2000);
-        return;
-      }
-      await refreshDashboard();
-      renderSteps(job);
-      state.activeJobId = null;
-      if (job.status === "done") {
-        const success = byId("upload-success");
-        success.textContent = `Upload processed successfully. ${job.days_added} new day${job.days_added === 1 ? "" : "s"} added; forecast updated.`;
-        success.hidden = false;
-      } else {
-        showUploadError(job.error || "The pipeline job failed.");
-      }
-    } catch (error) {
-      showUploadError(error.message);
-      setStatus(false, false);
-      state.activeJobId = null;
+      $("connection-chip").className = "status-chip status-error";
+      $("connection-chip").textContent = "Connection issue";
     }
   }
 
-  function showUploadError(message) {
-    const box = byId("upload-error");
-    box.textContent = message;
-    box.hidden = false;
-  }
-
-  async function uploadFile(file) {
-    byId("upload-error").hidden = true;
-    byId("upload-success").hidden = true;
-    if (!file) return;
-    if (!/\.(csv|xlsx)$/i.test(file.name)) {
-      showUploadError("Upload must be a .xlsx or .csv file.");
-      return;
-    }
-    const form = new FormData();
-    form.append("file", file);
-    const title = byId("drop-title");
-    const previousTitle = title.textContent;
-    title.textContent = `Uploading ${file.name}…`;
-    try {
-      const result = await api("/upload", { method: "POST", body: form });
-      renderSteps({ status: "queued", steps: STEP_NAMES.map((name, index) => ({ number: index + 1, name, status: "waiting" })) });
-      renderUploads(await api("/uploads"));
-      await pollJob(result.job_id);
-    } catch (error) {
-      showUploadError(error.message);
-      try { renderUploads(await api("/uploads")); } catch { /* Keep the upload error visible if activity refresh fails. */ }
-    } finally {
-      title.textContent = previousTitle;
-      byId("file-input").value = "";
-    }
-  }
-
-  function attachUploadControls() {
-    const input = byId("file-input");
-    const dropZone = byId("drop-zone");
-    input.addEventListener("change", () => uploadFile(input.files[0]));
-    ["dragenter", "dragover"].forEach((eventName) => {
-      dropZone.addEventListener(eventName, (event) => {
-        event.preventDefault();
-        dropZone.classList.add("is-dragging");
-      });
+  function renderPending(data) {
+    const box = $("pending-batches");
+    box.replaceChildren();
+    const batches = data.batches || [];
+    if (!batches.length) box.innerHTML = '<p class="empty-copy">No pending batches. New database rows will appear here.</p>';
+    batches.forEach(batch => {
+      const div = document.createElement("div"); div.className = "batch-row";
+      div.innerHTML = `<strong>${batch.source || "database"}</strong><span>${batch.first_date || "—"} – ${batch.last_date || "—"}</span><span>${batch.rows} rows</span>`;
+      box.append(div);
     });
-    ["dragleave", "drop"].forEach((eventName) => {
-      dropZone.addEventListener(eventName, (event) => {
-        event.preventDefault();
-        dropZone.classList.remove("is-dragging");
-      });
-    });
-    dropZone.addEventListener("drop", (event) => uploadFile(event.dataTransfer.files[0]));
-    document.querySelectorAll(".range-switch button").forEach((button) => {
-      button.addEventListener("click", () => {
-        document.querySelectorAll(".range-switch button").forEach((item) => {
-          item.classList.remove("selected");
-          item.setAttribute("aria-pressed", "false");
-        });
-        button.classList.add("selected");
-        button.setAttribute("aria-pressed", "true");
-        state.range = Number(button.dataset.days);
-        renderChart();
-      });
-    });
-    byId("rerun-button").addEventListener("click", async () => {
-      byId("upload-error").hidden = true;
-      try {
-        const result = await api("/rerun", { method: "POST" });
-        await pollJob(result.job_id);
-      } catch (error) {
-        showUploadError(error.message);
-      }
-    });
+    $("pending-total").textContent = `${data.pending_rows || 0} pending rows`;
+    const active = $("start-data").dataset.active === "true";
+    $("start-data").disabled = !data.pending_rows || active;
+    $("start-help").textContent = active ? "A run is active." : (!data.pending_rows ? "No pending data is available." : "Pending database rows are ready to process.");
+    if (data.direct_rows) $("direct-note").textContent = `${data.direct_rows} rows were inserted directly with no batch.`;
   }
 
-  async function pollDataVersion() {
+  async function refreshPending() {
+    try { renderPending(await api("/api/pending")); } catch (error) { $("pending-total").textContent = error.message; }
+  }
+
+  async function startData() {
+    try { await api("/api/start", { method: "POST" }); $("start-data").dataset.active = "true"; await refreshAll(); }
+    catch (error) { alert(error.message); }
+  }
+
+  async function loadHistory() {
+    const history = await api("/api/history?days=120");
+    renderChart(history.rows || [], stateForecastRows());
+  }
+  let selectedForecast = [];
+  function stateForecastRows() { return selectedForecast; }
+
+  async function loadForecast() {
     try {
-      const result = await api("/data-version");
-      const status = await api("/status");
-      if (state.health) state.health.job_running = Boolean(status.working);
-      renderRuntimeNotice(status, state.health);
-      if (status.working?.job_id && status.working.job_id !== state.activeJobId) {
-        pollJob(status.working.job_id);
-      }
-      if (state.version !== null && state.version !== result.version) {
-        await refreshDashboard();
-      }
-      setStatus(Boolean(status.working));
-      state.version = result.version;
+      const response = await api(`/api/forecast?model=${encodeURIComponent(model)}`);
+      selectedForecast = response.rows || [];
+      renderForecastState(response);
+      await loadHistory();
     } catch (error) {
-      setStatus(false, false);
-      renderRuntimeNotice(null, { data_error: error.message });
-    } finally {
-      state.versionTimer = window.setTimeout(pollDataVersion, 10000);
+      selectedForecast = [];
+      $("forecast-state").textContent = error.message;
+      await loadHistory();
     }
   }
 
-  async function start() {
-    attachUploadControls();
-    renderSteps();
-    renderUploads();
-    try {
-      await refreshDashboard();
-      const recentJob = (await api("/uploads"))[0];
-      if (recentJob?.job_id && ["queued", "running"].includes(recentJob.status)) {
-        const job = await api(`/jobs/${encodeURIComponent(recentJob.job_id)}`);
-        renderSteps(job);
-        if (["queued", "running"].includes(job.status)) {
-          await pollJob(job.job_id);
-        } else if (job.status === "done") {
-          const success = byId("upload-success");
-          success.textContent = `Most recent upload completed successfully. ${job.days_added} new day${job.days_added === 1 ? "" : "s"} added.`;
-          success.hidden = false;
-        } else if (job.status === "failed") {
-          showUploadError(job.error || "The most recent pipeline job failed.");
-        }
-      } else if (recentJob?.status === "done") {
-        const success = byId("upload-success");
-        success.textContent = `Most recent upload completed successfully. ${recentJob.days_added} new day${recentJob.days_added === 1 ? "" : "s"} added.`;
-        success.hidden = false;
-      }
-      const status = await api("/status");
-      if (status.working?.job_id && status.working.job_id !== state.activeJobId) {
-        await pollJob(status.working.job_id);
-      }
-      state.version = (await api("/data-version")).version;
-      pollDataVersion();
-    } catch (error) {
-      setStatus(false, false);
-      byId("chart-empty").hidden = false;
-      byId("chart-empty").textContent = `Dashboard could not load: ${error.message}`;
-      byId("forecast-rows").innerHTML = '<tr><td class="table-placeholder" colspan="5">Forecast unavailable.</td></tr>';
+  function renderForecastState(response) {
+    const panel = $("forecast-action"); panel.replaceChildren();
+    if (response.state === "ready") {
+      const rows = response.rows || []; selectedForecast = rows;
+      const total = rows.reduce((sum, row) => sum + Number(row.forecast || 0), 0);
+      $("kpi-total").textContent = money(total);
+      $("kpi-average").textContent = money(rows.length ? total / rows.length : 0);
+      $("forecast-model-title").textContent = names[model];
+      renderForecastTable(rows);
+      const a = document.createElement("a"); a.className = "button button-secondary"; a.href = `/api/forecast/download?model=${encodeURIComponent(model)}`; a.textContent = "Download CSV"; panel.append(a);
+    } else if (model === IDS.level) {
+      $("forecast-state").textContent = "Computing Level + calendar forecast…";
+      computeForecast();
+    } else if (response.state === "computing") {
+      $("forecast-state").textContent = `Computing forecast for ${names[model]}…`;
+    } else {
+      $("forecast-state").textContent = `Forecast not computed for the latest data.`;
+      const button = document.createElement("button"); button.className = "button button-primary"; button.textContent = "Compute forecast"; button.onclick = computeForecast; panel.append(button);
     }
   }
 
-  document.addEventListener("DOMContentLoaded", start);
+  function renderForecastTable(rows) {
+    const body = $("forecast-rows"); body.replaceChildren();
+    if (!rows.length) { body.innerHTML = '<tr><td class="table-placeholder" colspan="3">No forecast rows.</td></tr>'; return; }
+    rows.forEach(row => { const tr = document.createElement("tr"); tr.innerHTML = `<td>${dateLabel(row.date)}</td><td>${new Date(`${row.date}T00:00:00Z`).toLocaleDateString("en-US", { weekday: "long", timeZone: "UTC" })}</td><td>${money(row.forecast)}</td>`; body.append(tr); });
+  }
+
+  async function computeForecast() {
+    try { await api(`/api/forecast/run?model=${encodeURIComponent(model)}`, { method: "POST" }); await loadForecast(); }
+    catch (error) { $("forecast-state").textContent = error.message; }
+  }
+
+  function renderChart(history, forecast) {
+    const ctx = $("sales-chart"); if (!ctx || !window.Chart) return;
+    if (chart) chart.destroy();
+    const datasets = [{ label: "Actual sales", data: history.map(row => ({ x: row.date, y: Number(row.sales) })), borderColor: colors.actual, backgroundColor: "transparent", borderWidth: 2, pointRadius: 0 }];
+    if (history.some(row => row.is_new)) datasets.push({ label: "Newly added", data: history.filter(row => row.is_new).map(row => ({ x: row.date, y: Number(row.sales) })), borderColor: colors.new, backgroundColor: colors.new, pointRadius: 4, showLine: false });
+    if (forecast.length) datasets.push({ label: "Selected forecast", data: forecast.map(row => ({ x: row.date, y: Number(row.forecast) })), borderColor: colors.forecast, backgroundColor: "transparent", borderWidth: 2, pointRadius: 2 });
+    chart = new Chart(ctx, { type: "line", data: { datasets }, options: { responsive: true, maintainAspectRatio: false, animation: false, parsing: false, scales: { x: { type: "category" }, y: { beginAtZero: false } }, plugins: { legend: { position: "bottom" } } } });
+  }
+
+  function selectModel(id) {
+    model = id; localStorage.setItem("selectedModel", model); location.hash = model;
+    document.querySelectorAll(".model-button").forEach(button => { const selected = button.dataset.model === model; button.classList.toggle("selected", selected); button.setAttribute("aria-pressed", String(selected)); });
+    $("forecast-model-title").textContent = names[model]; selectedForecast = []; loadForecast();
+  }
+
+  async function refreshBatches() {
+    const batches = await api("/api/batches"); const body = $("batch-rows"); body.replaceChildren();
+    (batches.rows || []).slice(0, 8).forEach(batch => { const tr = document.createElement("tr"); tr.innerHTML = `<td>${batch.original_file_name || batch.source || "Database insert"}</td><td>${batch.rows}</td><td>${batch.status}</td><td>${batch.message || "—"}</td>`; body.append(tr); });
+  }
+
+  async function refreshAll() { await Promise.all([refreshHealth(), refreshPending(), loadHistory(), refreshBatches(), loadForecast()]); }
+
+  window.addEventListener("DOMContentLoaded", () => {
+    const hash = location.hash.slice(1); if (Object.values(IDS).includes(hash)) model = hash; localStorage.setItem("selectedModel", model);
+    $("start-data").onclick = startData;
+    document.querySelectorAll(".model-button").forEach(button => { const selected = button.dataset.model === model; button.classList.toggle("selected", selected); button.setAttribute("aria-pressed", String(selected)); button.onclick = () => selectModel(button.dataset.model); });
+    refreshAll(); pendingTimer = setInterval(() => { refreshHealth(); refreshPending(); }, 10000);
+  });
 })();

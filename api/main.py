@@ -1,285 +1,290 @@
-"""Loopback-only FastAPI app for local store-sales uploads and forecasts."""
-
 from __future__ import annotations
 
-import asyncio
-import logging
-import uuid
-from contextlib import asynccontextmanager
+import secrets
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import func, select, update
+from sqlalchemy.orm import Session
 
-from api import jobs
+from api.services import ACTIVE_RUN, LOCK, MODEL_IDS, MODEL_INFO, batch_pending, data_workflow, db_error, latest_version
+from db.config import database_url, engine
+from db.models import Batch, CleanSeries, DailyTotal, Forecast, Run, SalesNew
 
-
-LOGGER = logging.getLogger(__name__)
-FRONTEND_DIR = Path(__file__).resolve().parents[1] / "frontend"
-CHUNK_SIZE = 1024 * 1024
-
-
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    jobs.initialize()
-    try:
-        yield
-    finally:
-        jobs.shutdown()
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-app = FastAPI(
-    title="Advanced Time Series Sales Forecasting",
-    description="Local store-sales upload, refit, and forecast dashboard.",
-    lifespan=lifespan,
-)
+def require_api_key(x_api_key: str | None = Header(default=None)) -> str:
+    import os
+    expected = os.getenv("API_KEY", "")
+    if not expected:
+        raise RuntimeError("API_KEY is required in .env.")
+    if x_api_key is None:
+        raise HTTPException(status_code=401, detail="Missing API key.")
+    if not secrets.compare_digest(x_api_key, expected):
+        raise HTTPException(status_code=403, detail="Invalid API key.")
+    return x_api_key
+
+
+app = FastAPI(title="Advanced Time Series Store Sales")
+
+@app.on_event("startup")
+def startup_check():
+    import os
+    if not os.getenv("API_KEY", "").strip():
+        raise RuntimeError("API_KEY is required in .env. Add it to the local environment file.")
+    database_url()
 
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    last_date = None
-    error = None
     try:
-        functions = jobs.pipeline_functions()
-        master_path = functions.MASTER_RAW_PATH
-        if not master_path.is_file():
-            raise FileNotFoundError(f"File not found: {master_path}.")
-        master = pd.read_csv(master_path, usecols=["timestamp_utc"])
-        if master.empty:
-            raise ValueError(f"File is empty: {master_path}.")
-        last_date = pd.to_datetime(
-            master["timestamp_utc"], format="mixed", errors="raise"
-        ).max().strftime("%Y-%m-%d")
+        with Session(engine()) as session:
+            last = session.scalar(select(func.max(CleanSeries.date)))
+            return {"status": "OK", "database_ok": True, "database_error": None, "last_data_date": last.isoformat() if last else None, "active_run": ACTIVE_RUN}
     except Exception as exc:
-        error = str(exc)
-        LOGGER.warning("Health check could not read master data: %s", exc)
-    return {
-        "status": "OK",
-        "last_data_date": last_date,
-        "job_running": jobs.job_manager.is_running(),
-        "data_error": error,
-    }
+        info = db_error(exc)
+        return {"status": "ERROR", "database_ok": info["database_ok"], "database_error": info["database_error"], "last_data_date": None, "active_run": ACTIVE_RUN}
 
 
-@app.get("/status")
-def runtime_status() -> dict[str, Any]:
+@app.get("/api/pending")
+def pending() -> dict[str, Any]:
     try:
-        return jobs.job_manager.status()
+        with Session(engine()) as session:
+            pending_rows = session.execute(select(SalesNew).where(SalesNew.status == "pending").order_by(SalesNew.id)).scalars().all()
+            direct = session.scalar(select(func.count()).select_from(SalesNew).where(SalesNew.status == "pending", SalesNew.batch_id.is_(None))) or 0
+            batches = []
+            for batch in session.execute(select(Batch).where(Batch.status == "pending").order_by(Batch.received_at.desc())).scalars():
+                batches.append({"batch_id": batch.batch_id, "source": batch.source, "original_file_name": batch.original_file_name, "first_date": batch.first_date.isoformat() if batch.first_date else None, "last_date": batch.last_date.isoformat() if batch.last_date else None, "rows": batch.rows, "status": batch.status, "message": batch.message})
+            return {"pending_rows": len(pending_rows), "direct_rows": direct, "batches": batches}
     except Exception as exc:
-        LOGGER.exception("Could not read runtime status")
-        raise HTTPException(
-            status_code=500, detail=f"Could not read runtime status: {exc}"
-        ) from exc
+        raise HTTPException(status_code=503, detail=f"Database error: {db_error(exc)['database_error']}") from exc
 
 
-@app.get("/data-version")
-def data_version() -> dict[str, str]:
-    return {"version": jobs.job_manager.data_version()}
-
-
-@app.post("/upload", status_code=202)
-async def upload(file: UploadFile = File(...)) -> dict[str, str]:
-    if not jobs.job_manager.reserve_upload():
-        raise HTTPException(status_code=409, detail="A pipeline job is already running.")
-
-    upload_path: Path | None = None
-    enqueued = False
+@app.post("/api/start")
+def start_data() -> dict[str, int]:
+    global ACTIVE_RUN
+    if ACTIVE_RUN is not None:
+        raise HTTPException(status_code=409, detail="A data or forecast run is already active.")
     try:
-        original_name = (file.filename or "").replace("\\", "/").rsplit("/", 1)[-1]
-        original_name = original_name or "upload"
-        extension = Path(original_name).suffix.lower()
-        if extension not in {".csv", ".xlsx"}:
-            raise HTTPException(
-                status_code=400, detail="Upload must be a .xlsx or .csv file."
-            )
+        with Session(engine()) as session:
+            _, batch_ids = batch_pending(session)
+            session.commit()
+            count = session.scalar(select(func.count()).select_from(SalesNew).where(SalesNew.status == "pending")) or 0
+            if not count:
+                raise HTTPException(status_code=400, detail="There is no pending data to start.")
+            run = Run(kind="data", status="queued", step="Read pending data", batch_ids=batch_ids)
+            session.add(run)
+            session.flush()
+            run_id = run.run_id
+            session.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Database error: {db_error(exc)['database_error']}") from exc
+    with LOCK:
+        if ACTIVE_RUN is not None:
+            raise HTTPException(status_code=409, detail="A data or forecast run is already active.")
+        ACTIVE_RUN = run_id
+    thread = threading.Thread(target=_run_data, args=(run_id,), daemon=True)
+    thread.start()
+    return {"run_id": run_id}
 
-        jobs.ensure_runtime()
-        upload_path = jobs.INCOMING_DIR / f"{uuid.uuid4().hex}{extension}"
-        size = 0
-        with upload_path.open("wb") as output:
-            while chunk := await file.read(CHUNK_SIZE):
-                size += len(chunk)
-                if size > jobs.MAX_UPLOAD_BYTES:
-                    raise HTTPException(
-                        status_code=413, detail="Upload exceeds the 100 MB limit."
-                    )
-                output.write(chunk)
-        if size == 0:
-            raise HTTPException(status_code=422, detail="Upload contains no data rows.")
 
-        try:
-            _, metadata = await asyncio.to_thread(
-                jobs.validate_uploaded_file, upload_path, extension
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except Exception as exc:
-            LOGGER.exception("Could not validate uploaded file")
-            raise HTTPException(
-                status_code=422, detail=f"Could not validate upload: {exc}"
-            ) from exc
-
-        job = jobs.build_job(original_name, extension, metadata)
-        try:
-            job_id = jobs.job_manager.enqueue(job, upload_path)
-        except Exception as exc:
-            LOGGER.exception("Could not start background pipeline job")
-            raise HTTPException(
-                status_code=500, detail="Could not start the pipeline job."
-            ) from exc
-        enqueued = True
-        return {"job_id": job_id}
+def _run_data(run_id: int) -> None:
+    global ACTIVE_RUN
+    from pipeline import functions as pipeline_functions
+    try:
+        with Session(engine()) as session:
+            rows = session.execute(select(SalesNew).where(SalesNew.status == "pending").order_by(SalesNew.id)).scalars().all()
+            batch_ids = sorted({row.batch_id for row in rows if row.batch_id is not None})
+            records = [{"date": row.date.isoformat(), "store_nbr": row.store_nbr, "family": row.family, "sales": float(row.sales), "onpromotion": row.onpromotion} for row in rows]
+            session.execute(update(Run).where(Run.run_id == run_id).values(status="running", step="Read pending data", started_at=datetime.utcnow()))
+            session.commit()
+        for step in ("Aggregate by date", "Merge into history", "Clean the series", "Refit calendar and gradient boosting"):
+            with Session(engine()) as session:
+                session.execute(update(Run).where(Run.run_id == run_id).values(step=step))
+                session.commit()
+        version = data_workflow(records)
+        with Session(engine()) as session:
+            session.execute(update(SalesNew).where(SalesNew.status == "pending").values(status="processed"))
+            session.execute(update(Batch).where(Batch.batch_id.in_(batch_ids)).values(status="processed", message=None))
+            session.execute(update(Run).where(Run.run_id == run_id).values(status="done", step="Completed", finished_at=datetime.utcnow(), message=None))
+            session.commit()
+    except Exception as exc:
+        message = str(exc)
+        with Session(engine()) as session:
+            session.execute(update(Run).where(Run.run_id == run_id).values(status="failed", finished_at=datetime.utcnow(), message=message))
+            session.execute(update(Batch).where(Batch.batch_id.in_(batch_ids if 'batch_ids' in locals() else [])).values(status="failed", message=message))
+            session.execute(update(SalesNew).where(SalesNew.status == "pending", SalesNew.batch_id.in_(batch_ids if 'batch_ids' in locals() else [])).values(status="failed"))
+            session.commit()
     finally:
-        await file.close()
-        if not enqueued:
-            if upload_path is not None:
-                upload_path.unlink(missing_ok=True)
-            jobs.job_manager.release_reservation()
+        with LOCK:
+            ACTIVE_RUN = None
 
 
-@app.get("/jobs/{job_id}")
-def get_job(job_id: str) -> dict[str, Any]:
-    job = jobs.job_manager.get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found.")
-    return job
-
-
-@app.get("/uploads")
-def recent_uploads() -> list[dict[str, Any]]:
+@app.post("/model/data")
+def model_data(records: list[dict[str, Any]], _key: str = Depends(require_api_key)) -> dict[str, Any]:
     try:
-        return jobs.job_manager.list_uploads()
+        return {"data_version": data_workflow(records)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        LOGGER.exception("Could not list runtime uploads")
-        raise HTTPException(
-            status_code=500, detail=f"Could not list uploads: {exc}"
-        ) from exc
+        raise HTTPException(status_code=500, detail=f"Data processing failed: {exc}") from exc
 
 
-@app.get("/history")
+@app.post("/api/forecast/run")
+def api_forecast_run(model: str = Query(...)) -> dict[str, int]:
+    global ACTIVE_RUN
+    if model not in MODEL_IDS:
+        raise HTTPException(status_code=404, detail="Unknown model id.")
+    if ACTIVE_RUN is not None:
+        raise HTTPException(status_code=409, detail="A data or forecast run is already active.")
+    try:
+        with Session(engine()) as session:
+            version = latest_version(session)
+            if version is None:
+                raise HTTPException(status_code=404, detail="No data version is available.")
+            if session.scalar(select(func.count()).select_from(Forecast).where(Forecast.data_version == version.data_version, Forecast.model == model)):
+                return {"run_id": 0}
+            run = Run(kind="forecast", model=model, status="queued", step=f"Computing forecast for {MODEL_INFO[model][0]}", batch_ids=[])
+            session.add(run); session.flush(); run_id = run.run_id; session.commit()
+    except HTTPException:
+        raise
+    with LOCK:
+        if ACTIVE_RUN is not None:
+            raise HTTPException(status_code=409, detail="A data or forecast run is already active.")
+        ACTIVE_RUN = run_id
+    threading.Thread(target=_run_forecast, args=(run_id, model), daemon=True).start()
+    return {"run_id": run_id}
+
+
+def _run_forecast(run_id: int, model: str) -> None:
+    global ACTIVE_RUN
+    try:
+        _forecast_model(model)
+        with Session(engine()) as session:
+            session.execute(update(Run).where(Run.run_id == run_id).values(status="done", step="Completed", finished_at=datetime.utcnow(), message=None))
+            session.commit()
+    except Exception as exc:
+        with Session(engine()) as session:
+            session.execute(update(Run).where(Run.run_id == run_id).values(status="failed", finished_at=datetime.utcnow(), message=str(exc)))
+            session.commit()
+    finally:
+        with LOCK:
+            ACTIVE_RUN = None
+
+
+@app.post("/model/forecast")
+def model_forecast(payload: dict[str, str], _key: str = Depends(require_api_key)) -> dict[str, Any]:
+    model = payload.get("model")
+    if model not in MODEL_IDS:
+        raise HTTPException(status_code=404, detail="Unknown model id.")
+    try:
+        return {"rows": _forecast_model(model)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Forecast failed: {exc}") from exc
+
+
+def _forecast_model(model: str) -> int:
+    from pipeline import functions
+    with Session(engine()) as session:
+        version = latest_version(session)
+        if version is None:
+            raise ValueError("No data version is available.")
+        clean = session.execute(select(CleanSeries).order_by(CleanSeries.date)).scalars().all()
+    work = PROJECT_ROOT / "runtime" / "work" / "data"
+    clean_dir = work / "clean" / "train_cleaned_data"
+    clean_dir.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([{"timestamp_utc": row.date, "sales": float(row.sales), "sales_raw": float(row.sales_raw), "is_closure": row.is_closure} for row in clean]).to_csv(clean_dir / "daily_total_sales_clean.csv", index=False, date_format="%Y-%m-%d")
+    os_model = PROJECT_ROOT / "runtime" / "work" / "models"
+    import os
+    os.environ["STORE_SALES_DATA_DIR"] = str(work)
+    os.environ["STORE_SALES_MODEL_DIR"] = str(os_model)
+    pipelines = None
+    if model != "level_calendar_no_model":
+        from api.services import get_chronos_pipeline
+        pipelines = {"amazon/chronos-t5-large": get_chronos_pipeline()}
+    result = functions.forecast(pipelines=pipelines, model_id=model)
+    frame = pd.read_csv(result, parse_dates=["date"])
+    if model != "level_calendar_no_model":
+        frame = frame.loc[frame["model"] == model]
+    if frame.empty or len(frame) != 16 or frame["forecast"].isna().any():
+        raise ValueError("Forecast output is incomplete or contains invalid values.")
+    with Session(engine()) as session:
+        session.execute(__import__("sqlalchemy").delete(Forecast).where(Forecast.data_version == version.data_version, Forecast.model == model))
+        session.execute(__import__("sqlalchemy").insert(Forecast), [{"data_version": version.data_version, "model": model, "date": row.date.date(), "forecast": round(float(row.forecast), 9)} for row in frame.itertuples(index=False)])
+        session.commit()
+    return len(frame)
+
+
+@app.get("/api/runs/{run_id}")
+def run_status(run_id: int) -> dict[str, Any]:
+    try:
+        with Session(engine()) as session:
+            run = session.get(Run, run_id)
+            if run is None: raise HTTPException(status_code=404, detail="Run not found.")
+            elapsed = None
+            if run.started_at and run.finished_at: elapsed = (run.finished_at - run.started_at).total_seconds()
+            return {"run_id": run.run_id, "status": run.status, "step": run.step, "seconds_per_step": elapsed, "error": run.message}
+    except HTTPException: raise
+    except Exception as exc: raise HTTPException(status_code=503, detail=f"Database error: {db_error(exc)['database_error']}") from exc
+
+
+@app.get("/api/history")
 def history(days: int = Query(default=365, ge=1)) -> list[dict[str, Any]]:
-    functions = jobs.pipeline_functions()
-    if not functions.CLEAN_PATH.is_file():
-        raise HTTPException(status_code=404, detail="Cleaned history is not available.")
     try:
-        dataframe = pd.read_csv(
-            functions.CLEAN_PATH, parse_dates=["timestamp_utc"]
-        ).tail(days)
-        new_range = jobs.job_manager.latest_new_range()
-    except Exception as exc:
-        LOGGER.exception("Could not read cleaned history")
-        raise HTTPException(
-            status_code=500, detail=f"Could not read cleaned history: {exc}"
-        ) from exc
-    first_new = (
-        pd.Timestamp(new_range["first_date"])
-        if new_range and new_range.get("first_date")
-        else None
-    )
-    last_new = (
-        pd.Timestamp(new_range["last_date"])
-        if new_range and new_range.get("last_date")
-        else None
-    )
-    result: list[dict[str, Any]] = []
-    for row in dataframe.itertuples(index=False):
-        current_date = pd.Timestamp(row.timestamp_utc)
-        is_new = (
-            first_new is not None
-            and last_new is not None
-            and first_new <= current_date <= last_new
-        )
-        result.append(
-            {
-                "date": current_date.strftime("%Y-%m-%d"),
-                "sales": float(row.sales),
-                "is_new": bool(is_new),
-            }
-        )
-    return result
+        with Session(engine()) as session:
+            rows = session.execute(select(CleanSeries).order_by(CleanSeries.date.desc()).limit(days)).scalars().all()
+            latest = session.execute(select(Batch).where(Batch.status == "processed").order_by(Batch.received_at.desc()).limit(1)).scalar_one_or_none()
+            first, last = (latest.first_date, latest.last_date) if latest else (None, None)
+            return {"rows": [{"date": row.date.isoformat(), "sales": float(row.sales), "is_new": bool(first and last and first <= row.date <= last)} for row in reversed(rows)]}
+    except Exception as exc: raise HTTPException(status_code=503, detail=f"Database error: {db_error(exc)['database_error']}") from exc
 
 
-@app.get("/datasets")
-def datasets() -> list[dict[str, Any]]:
+@app.get("/api/forecast")
+def forecast_state(model: str = Query(...)) -> dict[str, Any]:
+    if model not in MODEL_IDS: raise HTTPException(status_code=404, detail="Unknown model id.")
     try:
-        return jobs.job_manager.list_datasets()
-    except Exception as exc:
-        LOGGER.exception("Could not list dated datasets")
-        raise HTTPException(
-            status_code=500, detail=f"Could not list dated datasets: {exc}"
-        ) from exc
+        with Session(engine()) as session:
+            version = latest_version(session)
+            if version is None: return {"state": "not_computed", "rows": [], "created_at": None, "first_forecast_date": None, "last_forecast_date": None, "data_version": None}
+            rows = session.execute(select(Forecast).where(Forecast.data_version == version.data_version, Forecast.model == model).order_by(Forecast.date)).scalars().all()
+            if rows:
+                return {"state": "ready", "rows": [{"date": r.date.isoformat(), "forecast": float(r.forecast)} for r in rows], "created_at": rows[0].created_at.isoformat() if rows[0].created_at else None, "first_forecast_date": rows[0].date.isoformat(), "last_forecast_date": rows[-1].date.isoformat(), "data_version": version.data_version}
+            active = session.execute(select(Run).where(Run.kind == "forecast", Run.model == model, Run.status.in_(["queued", "running"])).order_by(Run.run_id.desc()).limit(1)).scalar_one_or_none()
+            return {"state": "computing" if active else "not_computed", "rows": [], "created_at": None, "first_forecast_date": None, "last_forecast_date": None, "data_version": version.data_version}
+    except Exception as exc: raise HTTPException(status_code=503, detail=f"Database error: {db_error(exc)['database_error']}") from exc
 
 
-@app.get("/datasets/{filename}")
-def download_dataset(filename: str) -> FileResponse:
-    if Path(filename).name != filename or filename in {"", ".", ".."}:
-        raise HTTPException(status_code=400, detail="Invalid dataset filename.")
-    functions = jobs.pipeline_functions()
-    base = functions.MASTER_DIR.resolve()
-    path = (base / filename).resolve()
-    if path.parent != base or not path.is_file() or not filename.endswith(".csv"):
-        raise HTTPException(status_code=404, detail="Dated dataset not found.")
-    if not any(item["file"] == filename for item in jobs.job_manager.list_datasets()):
-        raise HTTPException(status_code=404, detail="Dated dataset not found.")
-    return FileResponse(path, media_type="text/csv", filename=filename)
+@app.get("/api/forecast/download")
+def forecast_download(model: str = Query(...)) -> FileResponse:
+    state = forecast_state(model)
+    rows = state["rows"]
+    path = PROJECT_ROOT / "runtime" / "forecast_download.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    return FileResponse(path, media_type="text/csv", filename=f"{model}_forecast.csv")
 
 
-def _latest_forecast_path() -> Path:
-    return jobs.pipeline_functions().FORECASTS_DIR / "latest_forecast.csv"
+@app.get("/api/models")
+def models() -> list[dict[str, str]]:
+    return [{"id": key, "plain_name": value[0], "description": value[1], "kind": value[2]} for key, value in MODEL_INFO.items()]
 
 
-def _forecast_created_at(path: Path) -> str:
-    return datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(
-        timespec="seconds"
-    )
-
-
-@app.get("/forecast/latest")
-def latest_forecast() -> dict[str, Any]:
-    path = _latest_forecast_path()
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="No forecast is available yet.")
+@app.get("/api/batches")
+def batches() -> list[dict[str, Any]]:
     try:
-        dataframe = pd.read_csv(path, parse_dates=["date"])
-        required = {"date", "model", "forecast"}
-        if not required.issubset(dataframe.columns):
-            raise ValueError("Forecast must contain date, model, and forecast columns.")
-        if dataframe.empty or dataframe[list(required)].isna().any().any():
-            raise ValueError("Forecast is empty or contains missing values.")
-        rows = [
-            {
-                "date": pd.Timestamp(row.date).strftime("%Y-%m-%d"),
-                "model": str(row.model),
-                "forecast": float(row.forecast),
-            }
-            for row in dataframe.itertuples(index=False)
-        ]
-    except Exception as exc:
-        LOGGER.exception("Could not read latest forecast")
-        raise HTTPException(
-            status_code=500, detail=f"Could not read latest forecast: {exc}"
-        ) from exc
-    return {"created_at": _forecast_created_at(path), "rows": rows}
+        with Session(engine()) as session:
+            result = []
+            for b in session.execute(select(Batch).order_by(Batch.received_at.desc()).limit(50)).scalars():
+                result.append({"batch_id": b.batch_id, "source": b.source, "original_file_name": b.original_file_name, "received_at": b.received_at.isoformat() if b.received_at else None, "first_date": b.first_date.isoformat() if b.first_date else None, "last_date": b.last_date.isoformat() if b.last_date else None, "rows": b.rows, "status": b.status, "message": b.message})
+            return {"rows": result}
+    except Exception as exc: raise HTTPException(status_code=503, detail=f"Database error: {db_error(exc)['database_error']}") from exc
 
-
-@app.get("/forecast/download")
-def download_forecast() -> FileResponse:
-    path = _latest_forecast_path()
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="No forecast is available yet.")
-    return FileResponse(path, media_type="text/csv", filename="latest_forecast.csv")
-
-
-@app.post("/rerun", status_code=202)
-def rerun() -> dict[str, str]:
-    job_id = jobs.job_manager.enqueue_manual_rerun()
-    if job_id is None:
-        raise HTTPException(status_code=409, detail="A pipeline job is already running.")
-    return {"job_id": job_id}
-
-
-app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+app.mount("/", StaticFiles(directory=PROJECT_ROOT / "frontend", html=True), name="frontend")

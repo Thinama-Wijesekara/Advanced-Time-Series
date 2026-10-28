@@ -641,13 +641,32 @@ def _load_chronos_pipelines(
     return pipelines, device, dtype
 
 
-def forecast(pipelines: dict[str, Any] | None = None) -> Path:
-    """Forecast with T5-large zero-shot, its GBM ensemble, and the level/calendar baseline."""
+def forecast(
+    pipelines: dict[str, Any] | None = None,
+    model_id: str | None = None,
+) -> Path:
+    """Forecast all three models, or only the requested selected-model identifier."""
     settings = _pipeline_settings()
     _ensure_data_directories()
     df = pd.read_csv(CLEAN_PATH, parse_dates=["timestamp_utc"])
     dates = pd.DatetimeIndex(df["timestamp_utc"])
     y = df["sales"].to_numpy("float64")
+    if model_id == LEVEL_CALENDAR:
+        future_dates = pd.date_range(dates[-1] + pd.Timedelta(days=1), periods=settings["horizon"], freq="D")
+        xcal_history = Xcal(dates)
+        xcal_future = Xcal(future_dates)
+        baseline_model_dir = _newest_model_dir(LEVEL_CALENDAR)
+        baseline_ridge = joblib.load(baseline_model_dir / "calendar_ridge_train_valid.joblib")
+        lookback = int(settings["level_lookback"])
+        ly = np.log1p(y)
+        baseline_level = (ly[-lookback:] - baseline_ridge.predict(xcal_history)[-lookback:]).mean()
+        result = pd.DataFrame({"date": future_dates, "model": LEVEL_CALENDAR, "forecast": np.expm1(baseline_level + baseline_ridge.predict(xcal_future))})
+        if not np.isfinite(result["forecast"].to_numpy(dtype="float64")).all():
+            raise ValueError("Forecast output contains NaN or infinite values.")
+        forecast_path = FORECASTS_DIR / f"forecast_{_timestamp()}.csv"
+        result.to_csv(forecast_path, index=False, date_format="%Y-%m-%d")
+        return forecast_path
+
     if len(y) < settings["context"]:
         raise ValueError(
             f"Need at least {settings['context']} clean daily rows; found {len(y)}."
@@ -658,6 +677,9 @@ def forecast(pipelines: dict[str, Any] | None = None) -> Path:
         LARGE_ENSEMBLE: _read_model_info(LARGE_ENSEMBLE),
         LEVEL_CALENDAR: _read_model_info(LEVEL_CALENDAR),
     }
+    selected_names = {LARGE_ZERO_SHOT, LARGE_ENSEMBLE, LEVEL_CALENDAR}
+    if model_id is not None and model_id not in selected_names:
+        raise ValueError(f"Unknown selected model: {model_id}.")
     for model_name, info in model_infos.items():
         expected_context = (
             settings["context"]
@@ -694,10 +716,11 @@ def forecast(pipelines: dict[str, Any] | None = None) -> Path:
             raise ValueError(
                 f"{model_name}/model_info.json must not reference a Chronos model."
             )
-    if pipelines is None:
+    needs_chronos = bool(set(model_infos) & {LARGE_ZERO_SHOT, LARGE_ENSEMBLE})
+    if needs_chronos and pipelines is None:
         pipelines, _, _ = _load_chronos_pipelines(model_infos)
 
-    zero_info = model_infos[LARGE_ZERO_SHOT]
+    zero_info = model_infos[LARGE_ZERO_SHOT] if LARGE_ZERO_SHOT in model_infos else model_infos[LARGE_ENSEMBLE] if LARGE_ENSEMBLE in model_infos else None
     zero_model_id = zero_info["huggingface_name"]
     zero_context = int(zero_info["context"])
     zero_horizon = int(zero_info["horizon"])
@@ -761,17 +784,7 @@ def forecast(pipelines: dict[str, Any] | None = None) -> Path:
         {"future": [len(adjusted_history)]},
         context_length,
     )
-    chronos_adjusted = back(
-        predict_all(
-            pipelines[info["huggingface_name"]],
-            ensemble_context,
-            horizon,
-            num_samples,
-            seed,
-            settings["prediction_batch_size"],
-        ),
-        ensemble_cal_future.reshape(1, -1),
-    )
+    chronos_adjusted = large_adjusted.copy()
     F, L = _future_gbm_rows(
         y,
         pd.DatetimeIndex(future_dates),
@@ -813,6 +826,9 @@ def forecast(pipelines: dict[str, Any] | None = None) -> Path:
 
     forecast_df = pd.concat(output_frames, ignore_index=True)
     expected_models = {LARGE_ZERO_SHOT, LARGE_ENSEMBLE, LEVEL_CALENDAR}
+    if model_id is not None:
+        forecast_df = forecast_df.loc[forecast_df["model"] == model_id].copy()
+        expected_models = {model_id}
     if set(forecast_df["model"]) != expected_models:
         raise ValueError("Forecast output does not contain exactly the three selected models.")
     model_counts = forecast_df.groupby("model").size()
