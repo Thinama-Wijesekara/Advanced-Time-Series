@@ -224,6 +224,7 @@ __marimo__/
 **/venv/
 
 # Local credentials and editor state.
+.env
 .env.*
 !.env.example
 .vscode/

@@ -138,3 +138,36 @@ python -m api.reset_data --confirm --forecast
 
 The runtime and its backups are local and gitignored. Do not copy client
 uploads or runtime data into Git.
+
+## PostgreSQL data commands
+
+Configure `.env` with `DATABASE_URL=postgresql+psycopg://USER:PASSWORD@localhost:5432/store_sales`, then install the database packages pinned to the supplied Chronos environment:
+
+```powershell
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m pip install -r api/requirements-db.txt
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m db.check
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m db.init
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m db.load_history
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m db.status
+```
+
+Every module accepts `--help`. Add a CSV or `.xlsx` store-level upload with:
+
+```powershell
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m db.add_new path\to\upload.csv
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m db.add_new path\to\upload.xlsx --source connector --replace
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m db.reset --yes
+```
+
+Rows can also be staged directly with `psql`; copy into `sales_new` and omit
+`batch_id`, `status`, and `received_at`, which receive defaults:
+
+```sql
+\copy sales_new(date, store_nbr, family, sales, onpromotion)
+FROM 'new_rows.csv' CSV HEADER
+```
+
+Direct inserts are validated when processing starts rather than at INSERT time.
+Raw sales use `NUMERIC(18,3)` to preserve Kaggle's three-decimal store values;
+daily and cleaned totals use `NUMERIC(18,9)` to preserve higher precision
+without binary floating-point drift.
