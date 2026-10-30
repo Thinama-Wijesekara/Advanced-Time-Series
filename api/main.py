@@ -107,11 +107,12 @@ def _run_data(run_id: int) -> None:
             records = [{"date": row.date.isoformat(), "store_nbr": row.store_nbr, "family": row.family, "sales": float(row.sales), "onpromotion": row.onpromotion} for row in rows]
             session.execute(update(Run).where(Run.run_id == run_id).values(status="running", step="Read pending data", started_at=datetime.now(timezone.utc)))
             session.commit()
-        for step in ("Aggregate by date", "Merge into history", "Clean the series", "Refit calendar and gradient boosting"):
-            with Session(engine()) as session:
-                session.execute(update(Run).where(Run.run_id == run_id).values(step=step))
-                session.commit()
-        version = data_workflow(records)
+        def update_step(step: str) -> None:
+            with Session(engine()) as step_session:
+                step_session.execute(update(Run).where(Run.run_id == run_id).values(status="running", step=step))
+                step_session.commit()
+
+        version = data_workflow(records, step_callback=update_step)
         with Session(engine()) as session:
             session.execute(update(SalesNew).where(SalesNew.status == "pending").values(status="processed"))
             session.execute(update(Batch).where(Batch.batch_id.in_(batch_ids)).values(status="processed", message=None))

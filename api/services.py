@@ -67,7 +67,7 @@ def run_record(session: Session, kind: str, model: str | None = None, batch_ids:
     return run
 
 
-def data_workflow(records: list[dict[str, Any]]) -> int:
+def data_workflow(records: list[dict[str, Any]], step_callback=None) -> int:
     import importlib
     from pipeline import functions as pipeline_functions
 
@@ -86,8 +86,12 @@ def data_workflow(records: list[dict[str, Any]]) -> int:
         pd.DataFrame([{"timestamp_utc": row.date, "sales": float(row.sales)} for row in totals]).to_csv(
             data_dir / "clean" / "train_cleaned_data" / "daily_total_sales.csv", index=False, date_format="%Y-%m-%d")
 
+    if step_callback:
+        step_callback("Read pending data")
     upload = pd.DataFrame(records)
     upload["date"] = pd.to_datetime(upload["date"])
+    if step_callback:
+        step_callback("Aggregate by date")
     os.environ["STORE_SALES_DATA_DIR"] = str(data_dir)
     os.environ["STORE_SALES_MODEL_DIR"] = str(model_dir)
     pipeline_functions = importlib.reload(pipeline_functions)
@@ -105,11 +109,17 @@ def data_workflow(records: list[dict[str, Any]]) -> int:
     expected = pipeline_functions._expected_store_count() * len(pd.read_csv(PROJECT_ROOT / "data" / "reference" / "stores.csv"))
     pipeline_functions._expected_store_count() if False else None
     daily = pipeline_functions.aggregate_upload(normalized)
+    if step_callback:
+        step_callback("Merge into history")
     master = pd.DataFrame(pd.read_csv(data_dir / "clean" / "train_cleaned_data" / "daily_total_sales.csv", parse_dates=["timestamp_utc"])[["timestamp_utc", "sales"]])
     merged = pd.concat([master, daily[["timestamp_utc", "sales"]]], ignore_index=True)
     merged = merged.drop_duplicates("timestamp_utc", keep="last").sort_values("timestamp_utc")
     merged.rename(columns={"timestamp_utc": "timestamp_utc"}).to_csv(data_dir / "clean" / "train_cleaned_data" / "daily_total_sales.csv", index=False, date_format="%Y-%m-%d")
+    if step_callback:
+        step_callback("Clean the series")
     pipeline_functions.preprocess()
+    if step_callback:
+        step_callback("Refit calendar and gradient boosting")
     pipeline_functions.refit()
 
     master_out = pd.read_csv(data_dir / "clean" / "train_cleaned_data" / "daily_total_sales.csv", parse_dates=["timestamp_utc"])

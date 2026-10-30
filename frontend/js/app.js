@@ -5,7 +5,7 @@
   const colors = { actual: "#7c91a8", new: "#24a47d", forecast: "#3269e8" };
   let model = localStorage.getItem("selectedModel") || IDS.level;
   if (!Object.values(IDS).includes(model)) model = IDS.level;
-  let chart = null, pendingTimer = null;
+  let chart = null, pendingTimer = null, runTimer = null, activeRunId = null;
   const $ = id => document.getElementById(id);
   async function api(path, options = {}) {
     const response = await fetch(path, { cache: "no-store", ...options });
@@ -51,9 +51,51 @@
     try { renderPending(await api("/api/pending")); } catch (error) { $("pending-total").textContent = error.message; }
   }
 
+  const DATA_STEPS = ["Read pending data", "Aggregate by date", "Merge into history", "Clean the series", "Refit calendar and gradient boosting"];
+  function renderDataSteps(current, status) {
+    const currentIndex = DATA_STEPS.indexOf(current);
+    document.querySelectorAll("[data-step]").forEach(row => {
+      const index = DATA_STEPS.indexOf(row.dataset.step);
+      row.classList.toggle("is-running", status !== "done" && status !== "failed" && index === currentIndex);
+      row.classList.toggle("is-done", status === "done" || index < currentIndex);
+      row.classList.toggle("is-failed", status === "failed" && index === currentIndex);
+      const marker = row.querySelector(".step-marker");
+      if (row.classList.contains("is-done")) marker.textContent = "✓";
+      else if (row.classList.contains("is-failed")) marker.textContent = "!";
+      else marker.textContent = String(index + 1);
+    });
+  }
+
+  async function pollRun(runId) {
+    activeRunId = runId;
+    $("start-data").dataset.active = "true";
+    if (runTimer) clearInterval(runTimer);
+    const poll = async () => {
+      try {
+        const run = await api(`/api/runs/${runId}`);
+        renderDataSteps(run.step, run.status);
+        if (run.status === "done") {
+          clearInterval(runTimer); runTimer = null; activeRunId = null;
+          $("start-data").dataset.active = "false";
+          await refreshAll();
+          await computeForecast();
+        } else if (run.status === "failed") {
+          clearInterval(runTimer); runTimer = null; activeRunId = null;
+          $("start-data").dataset.active = "false";
+          alert(run.error || "Data processing failed.");
+          await refreshAll();
+        }
+      } catch (error) { $("forecast-state").textContent = error.message; }
+    };
+    await poll();
+    runTimer = setInterval(poll, 1000);
+  }
+
   async function startData() {
-    try { await api("/api/start", { method: "POST" }); $("start-data").dataset.active = "true"; await refreshAll(); }
-    catch (error) { alert(error.message); }
+    try {
+      const result = await api("/api/start", { method: "POST" });
+      await pollRun(result.run_id);
+    } catch (error) { alert(error.message); }
   }
 
   async function loadHistory() {
