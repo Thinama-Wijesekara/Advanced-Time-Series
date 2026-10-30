@@ -44,7 +44,9 @@
     const active = $("start-data").dataset.active === "true";
     $("start-data").disabled = !data.pending_rows || active;
     $("start-help").textContent = active ? "A run is active." : (!data.pending_rows ? "No pending data is available." : "Pending database rows are ready to process.");
-    if (data.direct_rows) $("direct-note").textContent = `${data.direct_rows} rows were inserted directly with no batch.`;
+    $("direct-note").textContent = data.direct_rows
+      ? `${data.direct_rows} rows were inserted directly with no batch.`
+      : "Rows inserted directly without a batch also appear here.";
   }
 
   async function refreshPending() {
@@ -221,5 +223,8 @@
     $("start-data").onclick = startData;
     document.querySelectorAll(".model-button").forEach(button => { const selected = button.dataset.model === model; button.classList.toggle("selected", selected); button.setAttribute("aria-pressed", String(selected)); button.onclick = () => selectModel(button.dataset.model); });
     refreshAll(); pendingTimer = setInterval(() => { refreshHealth(); refreshPending(); }, 10000);
+    window.addEventListener("focus", refreshPending);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshPending(); });
+    window.addEventListener("pageshow", event => { if (event.persisted) refreshPending(); });
   });
 })();
