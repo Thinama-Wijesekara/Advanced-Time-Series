@@ -9,6 +9,7 @@ from sqlalchemy.engine import Engine
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(PROJECT_ROOT / ".env")
+_ENGINE: Engine | None = None
 
 
 def database_url() -> str:
@@ -23,4 +24,14 @@ def database_url() -> str:
 
 
 def engine() -> Engine:
-    return create_engine(database_url(), pool_pre_ping=True)
+    global _ENGINE
+    if _ENGINE is None:
+        _ENGINE = create_engine(
+            database_url(),
+            pool_pre_ping=True,
+            pool_size=5,
+            max_overflow=10,
+            pool_timeout=30,
+            pool_recycle=300,
+        )
+    return _ENGINE

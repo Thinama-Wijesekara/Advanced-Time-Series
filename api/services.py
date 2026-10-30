@@ -92,7 +92,12 @@ def data_workflow(records: list[dict[str, Any]]) -> int:
     os.environ["STORE_SALES_MODEL_DIR"] = str(model_dir)
     pipeline_functions = importlib.reload(pipeline_functions)
     # Prepare a model copy and version directory without modifying tracked models.
-    shutil.copytree(PROJECT_ROOT / "models" / "selected_models", model_dir, ignore=shutil.ignore_patterns("versions", ".tmp_*"))
+    shutil.copytree(
+        PROJECT_ROOT / "models" / "selected_models",
+        model_dir,
+        ignore=shutil.ignore_patterns("versions", ".tmp_*"),
+        dirs_exist_ok=True,
+    )
 
     normalized = pipeline_functions._normalize_store_upload(upload.rename(columns={"date": "date"}))
     pipeline_functions._validate_upload_dates(normalized["date"], pd.Timestamp(pd.read_csv(data_dir / "clean" / "train_cleaned_data" / "daily_total_sales.csv")["timestamp_utc"].max()))
