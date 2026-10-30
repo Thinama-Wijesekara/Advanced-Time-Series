@@ -63,3 +63,111 @@ an optional `upload_path`.
 python -m compileall -q pipeline
 python pipeline/validate_assets.py
 ```
+
+## Local web dashboard
+
+The local dashboard accepts store-level CSV and Excel (`.xlsx`) uploads and
+runs the same six pipeline steps for each valid file. It listens only on the
+loopback interface and does not send uploaded sales data to a hosted service.
+Chronos is not retrained; the calendar Ridge and GBM components are refit.
+
+Install the pinned Python 3.12 dependencies from the repository root:
+
+```powershell
+python -m pip install -r pipeline/requirements.txt
+```
+
+Start the local backend and open `http://127.0.0.1:8000/`:
+
+```powershell
+python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+```
+
+On first start, the app creates an ignored `runtime/` working copy of the
+tracked `data/` and `models/selected_models/` files. The store-level
+`data/raw/train.csv` is excluded and is never copied. The pipeline writes
+uploads, job state, refits, cleaned data, and forecasts only in this runtime
+copy, leaving tracked files untouched. The Chronos-large weights must already
+be cached or downloaded on the first forecast run.
+
+The page shows the current history and latest forecast before any upload.
+Accepted `.csv` and `.xlsx` files must contain `date`, `store_nbr`, `family`,
+and `sales` columns; each accepted upload runs validation, aggregation,
+history merge, cleaning, Ridge/GBM refit, and forecasting in sequence. The
+runtime keeps the latest forecast available if a later job fails.
+
+The runtime is the local source of truth for the dashboard:
+
+- Untouched uploads are stored in `runtime/data/raw/uploads/`.
+- The current master and cleaned series are stored in
+  `runtime/data/clean/train_cleaned_data/`.
+- Immutable dated copies and their JSON metadata are stored beside those
+  live series. `runtime/state/manifest.json` tracks successful uploads and
+  their archive/copy filenames; `runtime/state/jobs.json` stores job status.
+- The dashboard reads current files from disk and offers downloads for dated
+  copies. It checks every five seconds for deleted upload assets or direct
+  edits to the live master/cleaned files, waits for a 15-second quiet period,
+  then queues one rebuild/refit job. A rebuild starts from the tracked daily
+  baseline and replays the remaining upload archives. If an archive cannot
+  continue the contiguous history, it is retained and reported as ignored.
+- The chart/history refreshes when the live data or latest forecast changes.
+  The existing forecast remains in place if a job fails.
+
+For a PowerShell start with a clear port-8000 conflict message:
+
+```powershell
+.\start_app.ps1
+```
+
+Open the runtime files in Explorer/Finder/the system file browser:
+
+```powershell
+python -m api.open_runtime
+```
+
+Reset the runtime data to the repository baseline only when intended. The
+command requires `--confirm`, creates a timestamped backup under
+`runtime/runtime_backups/`, clears upload archives and dated copies from the
+active runtime, resets the manifest and job history, and preserves the
+current forecast by default. Add `--forecast` to clear that forecast too:
+
+```powershell
+python -m api.reset_data --confirm
+python -m api.reset_data --confirm --forecast
+```
+
+The runtime and its backups are local and gitignored. Do not copy client
+uploads or runtime data into Git.
+
+## PostgreSQL data commands
+
+Configure `.env` with `DATABASE_URL=postgresql+psycopg://USER:PASSWORD@localhost:5432/store_sales`, then install the database packages pinned to the supplied Chronos environment:
+
+```powershell
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m pip install -r api/requirements-db.txt
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m db.check
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m db.init
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m db.load_history
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m db.status
+```
+
+Every module accepts `--help`. Add a CSV or `.xlsx` store-level upload with:
+
+```powershell
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m db.add_new path\to\upload.csv
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m db.add_new path\to\upload.xlsx --source connector --replace
+C:\Users\ThinamaWijesekara\Envs\chronos\Scripts\python.exe -m db.reset --yes
+```
+
+Rows can also be staged directly with `psql`; copy into `sales_new` and omit
+`batch_id`, `status`, and `received_at`, which receive defaults:
+
+```sql
+\copy sales_new(date, store_nbr, family, sales, onpromotion)
+FROM 'new_rows.csv' CSV HEADER
+```
+
+Direct inserts are validated when processing starts rather than at INSERT time.
+Raw sales use `NUMERIC(18,3)` to preserve Kaggle's three-decimal store values;
+daily and cleaned totals use `NUMERIC(18,9)` to preserve higher precision
+without binary floating-point drift.

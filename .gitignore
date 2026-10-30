@@ -224,6 +224,7 @@ __marimo__/
 **/venv/
 
 # Local credentials and editor state.
+.env
 .env.*
 !.env.example
 .vscode/
@@ -238,6 +239,8 @@ data/clean/train_cleaned_data/*.csv
 !data/clean/train_cleaned_data/daily_total_sales_clean.csv
 models/selected_models/*/versions/
 models/selected_models/*/.tmp_*/
+runtime/
+runtime_backups/
 
 # Notebook and model inference caches.
 **/.ipynb_checkpoints/
