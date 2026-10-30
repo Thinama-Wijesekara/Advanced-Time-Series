@@ -40,11 +40,15 @@ def startup_check():
     if not os.getenv("API_KEY", "").strip():
         raise RuntimeError("API_KEY is required in .env. Add it to the local environment file.")
     database_url()
+    from db.reconcile import reconcile_now
+    reconcile_now()
 
 
 @app.get("/health")
 def health() -> dict[str, Any]:
     try:
+        from db.reconcile import reconcile_now
+        reconcile_now()
         with Session(engine()) as session:
             last = session.scalar(select(func.max(CleanSeries.date)))
             return {"status": "OK", "database_ok": True, "database_error": None, "last_data_date": last.isoformat() if last else None, "active_run": ACTIVE_RUN}
@@ -56,6 +60,8 @@ def health() -> dict[str, Any]:
 @app.get("/api/pending")
 def pending() -> dict[str, Any]:
     try:
+        from db.reconcile import reconcile_now
+        reconcile_now()
         with Session(engine()) as session:
             pending_rows = session.execute(select(SalesNew).where(SalesNew.status == "pending").order_by(SalesNew.id)).scalars().all()
             direct = session.scalar(select(func.count()).select_from(SalesNew).where(SalesNew.status == "pending", SalesNew.batch_id.is_(None))) or 0
