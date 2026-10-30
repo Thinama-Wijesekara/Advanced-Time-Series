@@ -111,10 +111,54 @@
   function renderChart(history, forecast) {
     const ctx = $("sales-chart"); if (!ctx || !window.Chart) return;
     if (chart) chart.destroy();
-    const datasets = [{ label: "Actual sales", data: history.map(row => ({ x: row.date, y: Number(row.sales) })), borderColor: colors.actual, backgroundColor: "transparent", borderWidth: 2, pointRadius: 0 }];
-    if (history.some(row => row.is_new)) datasets.push({ label: "Newly added", data: history.filter(row => row.is_new).map(row => ({ x: row.date, y: Number(row.sales) })), borderColor: colors.new, backgroundColor: colors.new, pointRadius: 4, showLine: false });
-    if (forecast.length) datasets.push({ label: "Selected forecast", data: forecast.map(row => ({ x: row.date, y: Number(row.forecast) })), borderColor: colors.forecast, backgroundColor: "transparent", borderWidth: 2, pointRadius: 2 });
-    chart = new Chart(ctx, { type: "line", data: { datasets }, options: { responsive: true, maintainAspectRatio: false, animation: false, parsing: false, scales: { x: { type: "category" }, y: { beginAtZero: false } }, plugins: { legend: { position: "bottom" } } } });
+
+    const labels = [...new Set([
+      ...history.map(row => row.date),
+      ...forecast.map(row => row.date)
+    ])].sort();
+    const actualByDate = new Map(history.map(row => [row.date, Number(row.sales)]));
+    const newByDate = new Map(history.filter(row => row.is_new).map(row => [row.date, Number(row.sales)]));
+    const forecastByDate = new Map(forecast.map(row => [row.date, Number(row.forecast)]));
+    const valuesFor = map => labels.map(date => map.has(date) ? map.get(date) : null);
+
+    const datasets = [{
+      label: "Actual sales",
+      data: valuesFor(actualByDate),
+      borderColor: colors.actual,
+      backgroundColor: "transparent",
+      borderWidth: 2,
+      pointRadius: 0,
+      spanGaps: false
+    }];
+    if (newByDate.size) datasets.push({
+      label: "Newly added",
+      data: valuesFor(newByDate),
+      borderColor: colors.new,
+      backgroundColor: colors.new,
+      pointRadius: 4,
+      showLine: false
+    });
+    if (forecastByDate.size) datasets.push({
+      label: "Selected forecast",
+      data: valuesFor(forecastByDate),
+      borderColor: colors.forecast,
+      backgroundColor: "transparent",
+      borderWidth: 2,
+      pointRadius: 2,
+      spanGaps: false
+    });
+
+    chart = new Chart(ctx, {
+      type: "line",
+      data: { labels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        scales: { x: { ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } }, y: { beginAtZero: false } },
+        plugins: { legend: { position: "bottom" } }
+      }
+    });
   }
 
   function selectModel(id) {
