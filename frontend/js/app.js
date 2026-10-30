@@ -56,8 +56,9 @@
     const currentIndex = DATA_STEPS.indexOf(current);
     document.querySelectorAll("[data-step]").forEach(row => {
       const index = DATA_STEPS.indexOf(row.dataset.step);
-      row.classList.toggle("is-running", status !== "done" && status !== "failed" && index === currentIndex);
-      row.classList.toggle("is-done", status === "done" || index < currentIndex);
+      const computingForecast = String(current || "").startsWith("Computing forecast for ");
+      row.classList.toggle("is-running", !computingForecast && status !== "done" && status !== "failed" && index === currentIndex);
+      row.classList.toggle("is-done", status === "done" || index < currentIndex || computingForecast);
       row.classList.toggle("is-failed", status === "failed" && index === currentIndex);
       const marker = row.querySelector(".step-marker");
       if (row.classList.contains("is-done")) marker.textContent = "✓";
@@ -78,7 +79,6 @@
           clearInterval(runTimer); runTimer = null; activeRunId = null;
           $("start-data").dataset.active = "false";
           await refreshAll();
-          await computeForecast();
         } else if (run.status === "failed") {
           clearInterval(runTimer); runTimer = null; activeRunId = null;
           $("start-data").dataset.active = "false";
@@ -93,7 +93,7 @@
 
   async function startData() {
     try {
-      const result = await api("/api/start", { method: "POST" });
+      const result = await api(`/api/start?model=${encodeURIComponent(model)}`, { method: "POST" });
       await pollRun(result.run_id);
     } catch (error) { alert(error.message); }
   }

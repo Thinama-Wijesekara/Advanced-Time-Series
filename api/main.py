@@ -68,7 +68,9 @@ def pending() -> dict[str, Any]:
 
 
 @app.post("/api/start")
-def start_data() -> dict[str, int]:
+def start_data(model: str = Query(default="level_calendar_no_model")) -> dict[str, int]:
+    if model not in MODEL_IDS:
+        raise HTTPException(status_code=404, detail="Unknown model id.")
     global ACTIVE_RUN
     if ACTIVE_RUN is not None:
         raise HTTPException(status_code=409, detail="A data or forecast run is already active.")
@@ -79,7 +81,7 @@ def start_data() -> dict[str, int]:
             count = session.scalar(select(func.count()).select_from(SalesNew).where(SalesNew.status == "pending")) or 0
             if not count:
                 raise HTTPException(status_code=400, detail="There is no pending data to start.")
-            run = Run(kind="data", status="queued", step="Read pending data", batch_ids=batch_ids)
+            run = Run(kind="data", model=model, status="queued", step="Read pending data", batch_ids=batch_ids)
             session.add(run)
             session.flush()
             run_id = run.run_id
@@ -113,6 +115,10 @@ def _run_data(run_id: int) -> None:
                 step_session.commit()
 
         version = data_workflow(records, step_callback=update_step)
+        with Session(engine()) as session:
+            selected_model = session.scalar(select(Run.model).where(Run.run_id == run_id)) or "level_calendar_no_model"
+        update_step(f"Computing forecast for {MODEL_INFO[selected_model][0]}")
+        _forecast_model(selected_model)
         with Session(engine()) as session:
             session.execute(update(SalesNew).where(SalesNew.status == "pending").values(status="processed"))
             session.execute(update(Batch).where(Batch.batch_id.in_(batch_ids)).values(status="processed", message=None))
